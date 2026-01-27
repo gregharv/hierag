@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.17.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: py313
+#     display_name: crit
 #     language: python
 #     name: python3
 # ---
@@ -230,13 +230,14 @@ def split_with_tabs(html, selector, converter=None, min_len=100, max_len=1000):
     
     return res
 
-page = db.q(f"select * from pages where site_id=2 limit 1")[0]
-site = db.q(f"select * from sites where id=2")[0]
-chunks2 = split_with_tabs(page['html'], site['selector'])
-[(i, len(c), c[:80]) for i,c in enumerate(chunks2)]
+# page = db.q(f"select * from pages where site_id=2 limit 1")[0]
+# site = db.q(f"select * from sites where id=2")[0]
+# chunks2 = split_with_tabs(page['html'], site['selector'])
+# [(i, len(c), c[:80]) for i,c in enumerate(chunks2)]
+
 
 # %%
-print(chunks2[0])
+# print(chunks2[0])
 
 # %%
 def create_extracts_from_page(html, selector, site_id, max_extract_len=100_000):
@@ -254,10 +255,9 @@ def create_extracts_from_page(html, selector, site_id, max_extract_len=100_000):
     site_config = utils.get_site_config(site_id)
     if site_config and 'split_function' in site_config:
         split_func_name = site_config['split_function']
-        if split_func_name == 'split_with_tabs':
-            raw_chunks = split_with_tabs(html, selector, max_len=100_000)
-        elif split_func_name == 'split_md_sections':
-            raw_chunks = split_md_sections(html, selector, max_len=100_000)
+        split_func = globals().get(split_func_name) or getattr(utils, split_func_name, None)
+        if callable(split_func):
+            raw_chunks = split_func(html, selector, max_len=100_000)
         else:
             # Fallback: simple HTML to text conversion
             soup = BeautifulSoup(html, 'lxml')
@@ -377,10 +377,12 @@ def create_chunks_from_extract(extract_text, max_chunk_len=1000):
     return chunks
 
 # %%
-def process_all_pages_to_extracts_and_chunks(db):
+def process_all_pages_to_extracts_and_chunks(db, clear_existing=True, use_upsert=False):
     """
     Process all pages to create extracts (10,000 chars) and chunks (1,000 chars).
     Both extracts and chunks include breadcrumb context.
+    If clear_existing is True, clears existing extracts/chunks per page before inserting.
+    If use_upsert is True, uses composite-key upserts for extracts/chunks.
     
     Returns:
         Tuple of (num_extracts_created, num_chunks_created)
@@ -397,17 +399,36 @@ def process_all_pages_to_extracts_and_chunks(db):
             print(f"Warning: Site {site_id} not found for page {page['id']}")
             continue
         
+        if clear_existing:
+            # Clear existing chunks and extracts for this page to avoid duplicates
+            existing_extracts = list(db.t.extracts.rows_where('page_id=?', [page['id']]))
+            if existing_extracts:
+                extract_ids = [e['id'] for e in existing_extracts]
+                for extract_id in extract_ids:
+                    for chunk in db.t.chunks.rows_where('extract_id=?', [extract_id]):
+                        db.t.chunks.delete(chunk['id'])
+                for extract in existing_extracts:
+                    db.t.extracts.delete(extract['id'])
+
         # Create extracts from page
         extracts = create_extracts_from_page(page['html'], site['selector'], site_id, max_extract_len=100_000)
         
         # Store extracts in database
         page_chunks_count = 0
         for i, extract_text in enumerate(extracts):
-            extract = db.t.extracts.insert(
-                page_id=page['id'],
-                extract_index=i,
-                text=extract_text,
-            )
+            if use_upsert:
+                extract = db.t.extracts.upsert(
+                    page_id=page['id'],
+                    extract_index=i,
+                    text=extract_text,
+                    pk=['page_id', 'extract_index'],
+                )
+            else:
+                extract = db.t.extracts.insert(
+                    page_id=page['id'],
+                    extract_index=i,
+                    text=extract_text,
+                )
             total_extracts += 1
             
             # Create chunks from extract
@@ -415,11 +436,19 @@ def process_all_pages_to_extracts_and_chunks(db):
             
             # Store chunks in database
             for j, chunk_text in enumerate(chunks):
-                db.t.chunks.insert(
-                    extract_id=extract['id'],
-                    chunk_index=j,
-                    text=chunk_text,
-                )
+                if use_upsert:
+                    db.t.chunks.upsert(
+                        extract_id=extract['id'],
+                        chunk_index=j,
+                        text=chunk_text,
+                        pk=['extract_id', 'chunk_index'],
+                    )
+                else:
+                    db.t.chunks.insert(
+                        extract_id=extract['id'],
+                        chunk_index=j,
+                        text=chunk_text,
+                    )
                 total_chunks += 1
                 page_chunks_count += 1
         
@@ -465,5 +494,7 @@ print(db.t.chunks()[2]['text'])
 
 # for x in db.t.extracts():
 #     db.t.extracts.delete(x['id'])
+
+# %%
 
 # %%

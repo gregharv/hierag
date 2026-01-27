@@ -1,2 +1,5 @@
+.env
+.sesskey
 *.db*
-00_utils*
+00_utils.*
+__pycache__/
