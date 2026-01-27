@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.17.3
 #   kernelspec:
-#     display_name: crit
+#     display_name: py313
 #     language: python
 #     name: python3
 # ---
@@ -21,6 +21,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from fastlite import database
 from openai import OpenAI
+import httpx
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -140,7 +141,7 @@ def build_source_links(db, scored_results, max_sources=3):
     return sources
 
 # %%
-def answer_query_with_context(query, top_k=5, max_extracts=3, verbose=True):
+def answer_query_with_context(query, top_k=5, max_extracts=3):
     """Search, gather context, and ask the LLM to answer."""
     t0 = time.perf_counter()
     scored = search_embeddings(db, query, top_k=top_k)
@@ -148,11 +149,10 @@ def answer_query_with_context(query, top_k=5, max_extracts=3, verbose=True):
     context = build_context(extracts)
 
     if not context:
-        if verbose:
-            print("No context available to send to the LLM.")
+        print("No context available to send to the LLM.")
         return None, []
 
-    client = OpenAI()
+    client = OpenAI(http_client=httpx.Client(verify=False))
     t_llm = time.perf_counter()
     response = client.responses.create(
         model=LLM_MODEL,
@@ -183,19 +183,17 @@ def answer_query_with_context(query, top_k=5, max_extracts=3, verbose=True):
         ],
     )
 
-    if verbose:
-        print(f"timing: llm_response {time.perf_counter() - t_llm:.3f}s")
-        print(f"timing: total {time.perf_counter() - t0:.3f}s")
-        print(response.output_text)
+    print(f"timing: llm_response {time.perf_counter() - t_llm:.3f}s")
+    print(f"timing: total {time.perf_counter() - t0:.3f}s")
+    print(response.output_text)
     sources = build_source_links(db, scored, max_sources=max_extracts)
-    if verbose and sources:
+    if sources:
         print("\nSources:")
         for source in sources:
             print(f"- {source['url']}")
     return response.output_text, sources
 
 # %%
-if __name__ == "__main__":
-    answer_query_with_context("how can i get an edp")
+answer_query_with_context("transfer service")
 
 # %%

@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.17.3
 #   kernelspec:
-#     display_name: crit
+#     display_name: py313
 #     language: python
 #     name: python3
 # ---
@@ -99,9 +99,6 @@ def scrape_discovered_pages(db, site_id=None, url_filter=None, delay=0.5):
                                  last_scraped=now, last_changed=now)
                 print(f"✓ {url} (scraped)")
                 scraped += 1
-
-            _collect_pdfs(db, site_id_val, url, html)
-            _collect_pdfs_from_subpages(db, site_id_val, url, html)
             
             time.sleep(delay)
         except Exception as e:
@@ -115,42 +112,6 @@ import httpx
 from bs4 import BeautifulSoup
 import hashlib
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
-
-PDF_GUARDRAILS = {"max_pdfs_per_page": 10}
-
-def _links(html, base_url):
-    return [urljoin(base_url, a["href"]) for a in BeautifulSoup(html, "lxml").find_all("a", href=True)]
-
-def _pdf_like(url):
-    u = url.lower()
-    return ".pdf" in u or "/uploadedfiles/" in u
-
-def _save_pdf(db, site_id, pdf_url, source_url, resp=None):
-    if list(db.t.pdfs.rows_where("url=?", [pdf_url], limit=1)): return
-    resp = resp or httpx.get(pdf_url, timeout=20, follow_redirects=True, verify=False)
-    if resp.status_code != 200: return
-    ct = resp.headers.get("content-type", "").lower()
-    if "application/pdf" not in ct and ".pdf" not in pdf_url.lower(): return
-    pdf_bytes = resp.content
-    now = datetime.utcnow().isoformat()
-    db.t.pdfs.insert(site_id=site_id, url=pdf_url, source_url=source_url, content_type=ct.split(";")[0], content_hash=hashlib.md5(pdf_bytes).hexdigest(), bytes=pdf_bytes, pages=None, last_scraped=now, last_changed=now)
-
-def _collect_pdfs(db, site_id, page_url, html):
-    cap = PDF_GUARDRAILS["max_pdfs_per_page"]
-    for u in [x for x in _links(html, page_url) if _pdf_like(x)][:cap]:
-        _save_pdf(db, site_id, u, page_url)
-
-def _collect_pdfs_from_subpages(db, site_id, page_url, html):
-    root = urlparse(page_url).netloc
-    base = urlparse(page_url).path.rstrip("/") + "/"
-    for link in _links(html, page_url):
-        p = urlparse(link)
-        if p.netloc not in {root, f"www.{root}", root.replace("www.", "")} or not p.path.startswith(base): continue
-        resp = httpx.get(link, timeout=10, follow_redirects=True, verify=False)
-        if resp.status_code != 200: continue
-        if "application/pdf" in resp.headers.get("content-type", "").lower(): _save_pdf(db, site_id, link, page_url, resp)
-        else: _collect_pdfs(db, site_id, link, resp.text)
 
 def fetch_page(db, site_id, url):
     """Fetch a single page and store it"""
@@ -175,8 +136,6 @@ def fetch_page(db, site_id, url):
         else:
             db.t.pages.update({'id': page['id'], 'last_scraped': now})
             print(f"  {url} (unchanged)")
-        _collect_pdfs(db, site_id, url, html)
-        _collect_pdfs_from_subpages(db, site_id, url, html)
         return page['id']
     else:
         # Check if we already have this content_hash (duplicate HTML)
@@ -194,13 +153,11 @@ def fetch_page(db, site_id, url):
             row = db.t.pages.insert(site_id=site_id, url=url, html=html, content_hash=content_hash,
                                     last_scraped=now, last_changed=now)
             print(f"✓ New: {url}")
-        _collect_pdfs(db, site_id, url, html)
-        _collect_pdfs_from_subpages(db, site_id, url, html)
         return row['id']
 
 
 # %% time_run="2026-01-24T21:38:11.067147+00:00"
-scrape_discovered_pages(db, 1)
+scrape_discovered_pages(db, 2)
 
 # %% time_run="2026-01-24T21:38:29.138686+00:00"
 # JEA page (site_id=1)

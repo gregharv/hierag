@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.17.3
 #   kernelspec:
-#     display_name: crit
+#     display_name: py313
 #     language: python
 #     name: python3
 # ---
@@ -162,5 +162,10 @@ _orig_root = db.t.sites[1]["root_url"]
 db.t.sites.update({"id": 1, "root_url": "https://www.jea.com/About/Procurement/Bid_Results/"})
 crawl_site(db, 1, max_pages=10)
 db.t.sites.update({"id": 1, "root_url": _orig_root})
+
+# %%
+
+# %%
+crawl_site(db, 2)
 
 # %%

@@ -340,7 +340,7 @@ def post(message: str):
     user_msg = chat_bubble("user", message)
     try:
         reply, sources = _llmapi.answer_query_with_context(
-            message, top_k=5, max_extracts=3, verbose=False
+            message, top_k=5, max_extracts=3
         )
     except Exception as exc:
         reply = f"Sorry, I hit an error: {exc}"
