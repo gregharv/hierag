@@ -1,23 +1,74 @@
+# Secrets and local environment files
 .env
+.env.*
+!.env.example
 .sesskey
-*.db*
-data/app.db
-data/app.db-shm
-data/app.db-wal
-00_utils.*
-.pytest_cache/
+
+# Python cache, tooling, and virtual environments
 __pycache__/
-backend/__pycache__/
-backend/app/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.py,cover
+.python-version
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+ENV/
 backend/.venv/
-core/__pycache__/
-interfaces/api/__pycache__/
+
+# Test coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Runtime data and sqlite files
+data/*
+!data/.gitkeep
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+
+# Frontend dependencies and build output
+node_modules/
 frontend/node_modules/
-frontend/dist/
 interfaces/client/node_modules/
+frontend/dist/
 interfaces/client/dist/
 interfaces/client/storybook-static/
+interfaces/client/.vite/
+storybook-static/
 *storybook.log
-storybook-static
-docs/hybrid-retrieval.html
-docs/core-directory-diagram.html
+
+# Quarto docs output
+docs/.quarto/
+docs/_site/
+docs/*.html
+
+# Editor / IDE files
+.cursor/
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# OS junk files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local scratch files
+00_utils.*
