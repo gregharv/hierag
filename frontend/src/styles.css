@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.chat-bubble {
+  white-space: pre-wrap;
+}
+
+.markdown {
+  line-height: 1.6;
+}
+
+.markdown p {
+  margin: 0 0 0.5rem 0;
+}
+
+.markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0.5rem 0 0.5rem 1.25rem;
+  padding: 0;
+}
+
+.markdown li {
+  margin: 0.25rem 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 0.75rem 0 0.35rem 0;
+  font-weight: 600;
+}
+
+.markdown code {
+  background: hsl(var(--b2));
+  padding: 0 0.25rem;
+  border-radius: 0.25rem;
+}
+
+.markdown pre {
+  background: hsl(var(--b2));
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  overflow: auto;
+}
+
+.markdown a {
+  text-decoration: underline;
+}
+
+.debug-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: hsl(var(--b2));
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}

@@ -3,3 +3,5 @@
 *.db*
 00_utils.*
 __pycache__/
+*storybook.log
+storybook-static
