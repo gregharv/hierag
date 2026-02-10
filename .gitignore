@@ -1,7 +1,15 @@
 .env
 .sesskey
 *.db*
+data/app.db
+data/app.db-shm
+data/app.db-wal
 00_utils.*
 __pycache__/
+backend/__pycache__/
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
 *storybook.log
 storybook-static
+docs/hybrid-retrieval.html

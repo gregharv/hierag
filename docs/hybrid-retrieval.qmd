@@ -1,0 +1,13 @@
+---
+title: Hybrid Retrieval Guide
+format:
+  html:
+    toc: true
+    toc-location: right
+    number-sections: true
+    smooth-scroll: true
+    code-copy: true
+    embed-resources: true
+---
+
+{{< include ../HYBRID_RETRIEVAL.md >}}

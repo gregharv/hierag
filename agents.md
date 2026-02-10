@@ -1,111 +1,152 @@
 # AGENTS.md
 
 > **Role:** You are an expert Full-Stack AI Developer specializing in "AI-Native" workflows.
-> **Goal:** We prioritize **standard file formats** (.py, .ts, .tsx) over notebooks for logic, but we insist on **immediate interactivity** and verification via script markers and Storybook.
+> **Goal:** We prioritize **standard file formats** (.py, .ts, .tsx) over notebooks for logic, but we insist on **immediate interactivity** and verification via script markers, Storybook, and Quarto.
 
 ---
 
-## 1. Project Context
-* **Type:** Monorepo
-* **Backend:** Python 3.12+, FastAPI, SQLModel, SQLite. Located in `/backend`.
-* **Frontend:** TypeScript, Vite, React, Tailwind CSS, Storybook. Located in `/frontend`.
-* **Data:** SQLite database stored in `/data/app.db` (gitignored).
+## 1. Project Structure (The "Core + Interfaces" Pattern)
+
+We use a Monorepo structure where pure logic (`core`) is separated from delivery mechanisms (`interfaces`).
+
+```text
+my-project/
+├── core/                    # SHARED PYTHON LOGIC (The "Brain")
+│   ├── __init__.py
+│   ├── logic.py             # Pure business logic (No API/UI code)
+│   ├── models.py            # Pydantic/SQLModel schemas
+│   └── db.py                # FastLite connection setup
+│
+├── interfaces/              # DELIVERY MECHANISMS (The "Heads")
+│   ├── dashboard/           # Streamlit (Option A: Simple Data Apps)
+│   │   └── app.py
+│   ├── web/                 # FastHTML (Option B: Multi-Page Python Web App)
+│   │   └── main.py
+│   ├── client/              # Vite + React (Option C: Complex Client Interaction)
+│   │   └── src/
+│   └── api/                 # FastAPI (Needed only if using Option C)
+│       └── main.py
+│
+├── data/                    # PERSISTENCE (Git-Ignored)
+│   ├── app.db               # Main application database
+│   ├── analytics.db         # Separate analytics events
+│   ├── cache.db             # Temporary storage
+│   └── uploads/             # User uploaded files
+│
+├── docs/                    # KNOWLEDGE BASE (Quarto)
+│   ├── _quarto.yml          # Documentation config
+│   ├── index.qmd            # Homepage
+│   └── tutorials/           # Jupyter Notebooks for analysis
+│       └── 01_analysis.ipynb
+│
+├── AGENTS.md                # This file (AI Instructions)
+├── pyproject.toml           # Python dependencies (managed by uv)
+├── uv.lock                  # Lockfile
+└── README.md
+
+```
 
 ---
 
-## 2. Core Philosophy: "Verification First"
+## 2. Directory Boundaries & Rules
+
+### A. `/core` (The Brain)
+
+* **Content:** PURE Python logic, database access, and models.
+* **Rule:** NEVER import from `interfaces/`. This module must be standalone.
+* **Database:** Use `FastLite` for direct SQLite interaction.
+
+### B. `/interfaces` (The "Decision Menu")
+
+When starting a frontend task, choose the simplest option that fits the requirement:
+
+* **Option A: Streamlit (`interfaces/dashboard`)**
+* *Use when:* Building internal tools, admin panels, or quick data visualizations.
+* *Stack:* Pure Python. Imports `core` directly.
+
+
+* **Option B: FastHTML (`interfaces/web`)**
+* *Use when:* Building a public multi-page website, a blog, or a standard CRUD app.
+* *Stack:* Python + HTMX. Imports `core` directly. Server-Side Rendering.
+
+
+* **Option C: Vite + React (`interfaces/client`)**
+* *Use when:* Building a highly interactive "app-like" experience (drag-and-drop, complex state).
+* *Stack:* TypeScript/React. REQUIRES `interfaces/api` (FastAPI) to talk to `core`.
+
+
+
+### C. `/data` (The Persistence Layer)
+
+* **Rule:** This folder is **Git-Ignored**.
+* **Usage:**
+* **Multiple DBs:** The system is designed to handle multiple SQLite files.
+* **Naming:** `users.db`, `logs.db`, `jobs.db`.
+* **Connection:** `db = database("data/users.db")`
+
+
+
+---
+
+## 3. Core Philosophy: "Verification First"
+
 **Rule #1:** Never write code without immediately writing a way to verify it.
-* **Backend:** Logic must be verifiable via an interactive script block (`# %%`) at the bottom of the file.
-* **Frontend:** Components must be verifiable via a Storybook story (`.stories.tsx`).
 
----
+### Backend (Python)
 
-## 3. Backend Rules (Python/FastAPI)
-
-### A. Structure
-* All business logic goes in `backend/app/`.
-* **Do not** put app logic in `.ipynb` files. Notebooks are for data exploration only.
-* Use `SQLModel` for all ORM definitions.
-
-### B. The "Interactive Script" Pattern
-Every time you create or modify a `.py` file (models, services, utils), you **MUST** append an interactive check block at the bottom of the file.
-* Use the standard VS Code cell marker: `# %%`
-* Wrap execution in `if __name__ == "__main__":`
-* **Requirement:** The script must create a dummy environment (e.g., in-memory DB) and print "Check Passed" if successful.
+* **Interactive Checks:** Every `.py` file in `core/` MUST end with a `if __name__ == "__main__":` block.
+* **Marker:** Use the standard `# %%` cell marker.
+* **Behavior:** The block must run a sanity check (e.g., create a temporary FastLite DB, insert a row, print the result).
 
 **Example:**
+
 ```python
-# backend/app/services.py
-def calculate_total(price: int, tax: float) -> float:
-    return price * (1 + tax)
+# core/users.py
+from fastlite import database
+def create_user(db, name):
+    return db.t.users.insert(name=name)
 
 # %%
 if __name__ == "__main__":
-    print("--- Verifying Calculation ---")
-    assert calculate_total(100, 0.2) == 120.0
+    print("--- Verifying User Creation ---")
+    db = database(":memory:")
+    user = create_user(db, "Alice")
+    print(f"User created: {user}")
+    assert user['name'] == "Alice"
     print("Check Passed ✅")
 
 ```
 
-### C. Database Checks
+### Frontend (React/Vite Only)
 
-When writing SQLModel classes, the check block must:
-
-1. Create an in-memory engine: `create_engine("sqlite:///:memory:")`
-2. Create tables: `SQLModel.metadata.create_all(engine)`
-3. Insert a test row to verify schema validity.
+* **Storybook:** Every component (e.g., `Card.tsx`) MUST have a sibling `Card.stories.tsx`.
+* **States:** Define at least a "Default" and "Empty/Loading" state.
 
 ---
 
-## 4. Frontend Rules (Vite/React)
+## 4. Tech Stack Rules
 
-### A. Structure
+### Python (Core/API/Web)
 
-* Components go in `frontend/src/components/`.
-* Use **Functional Components** with Hooks.
-* Use **Tailwind CSS** for styling (avoid CSS modules unless necessary).
-* Use **React Query** for server state management.
-
-### B. The "Storybook" Pattern
-
-We do not use `console.log` debugging for UI.
-
-* For every component (e.g., `UserProfile.tsx`), you **MUST** create a sibling story file (`UserProfile.stories.tsx`).
-* Define at least two states:
-1. **Default:** Happy path with mock data.
-2. **Loading/Error:** Edge case visualization.
+* **Manager:** Use `uv`.
+* Install: `uv add <package>`
+* Run: `uv run <script>`
 
 
+* **Linting:** Use `ruff`. Run `uv run ruff check .` before finishing a task.
+* **Database:** Use `FastLite`.
 
-**Example:**
+### Documentation (Quarto)
 
-```tsx
-// frontend/src/components/Button.stories.tsx
-import type { Meta, StoryObj } from '@storybook/react';
-import { Button } from './Button';
-
-const meta: Meta<typeof Button> = { component: Button };
-export default meta;
-
-export const Primary: StoryObj<typeof Button> = {
-  args: { label: 'Click Me', primary: true },
-};
-
-```
+* **Tool:** Quarto.
+* **Usage:** Use notebooks in `docs/tutorials` to document complex `core` logic.
 
 ---
 
-## 5. Forbidden Patterns
+## 5. Common Commands
 
-1. **No Logic in Notebooks:** Never define API routes or database models inside `playground/*.ipynb`.
-2. **No Raw SQL:** Always use SQLModel/SQLAlchemy ORM methods.
-3. **No "Blind" Code:** Do not submit code without the accompanying `# %%` check or `.stories.tsx` file.
-
----
-
-## 6. Common Commands
-
-* **Start Backend:** `cd backend && poetry run uvicorn app.main:app --reload`
-* **Start Frontend:** `cd frontend && npm run dev`
-* **Run Storybook:** `cd frontend && npm run storybook`
-* **Run Tests:** `cd backend && pytest`
+* **Install All:** `uv sync`
+* **Start Streamlit:** `cd interfaces/dashboard && uv run streamlit run app.py`
+* **Start FastHTML:** `cd interfaces/web && uv run python main.py`
+* **Start React:** `cd interfaces/client && npm run dev`
+* **Start API:** `cd interfaces/api && uv run uvicorn main:app --reload`

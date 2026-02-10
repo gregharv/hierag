@@ -11,6 +11,7 @@
     "build-storybook": "storybook build"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.6",
     "lucide-react": "^0.452.0",
     "marked": "^12.0.2",
     "react": "^18.3.1",
@@ -31,10 +32,13 @@
     "@storybook/addon-a11y": "^10.2.8",
     "@storybook/addon-docs": "^10.2.8",
     "@storybook/addon-onboarding": "^10.2.8",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
     "prop-types": "^15.8.1",
     "vitest": "^4.0.18",
     "playwright": "^1.58.2",
     "@vitest/browser-playwright": "^4.0.18",
-    "@vitest/coverage-v8": "^4.0.18"
+    "@vitest/coverage-v8": "^4.0.18",
+    "typescript": "^5.9.3"
   }
 }
