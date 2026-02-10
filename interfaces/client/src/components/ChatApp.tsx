@@ -85,7 +85,28 @@ function domainFromUrl(url) {
   }
 }
 
+function scoringGuideHref() {
+  const guidePath = "/connections/reference/hybrid-retrieval";
+  try {
+    if (document.referrer) {
+      const referrer = new URL(document.referrer);
+      if (referrer.pathname.startsWith("/connections")) {
+        return `${referrer.origin}${guidePath}`;
+      }
+    }
+  } catch {
+    // Fall through to local paths.
+  }
+
+  if (window.location.pathname.startsWith("/connections")) {
+    return guidePath;
+  }
+
+  return "/reference/hybrid-retrieval";
+}
+
 export function ChatApp() {
+  const guideHref = scoringGuideHref();
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(parseChatId());
   const [debugMessageId, setDebugMessageId] = useState(parseDebugMessageId());
@@ -536,7 +557,7 @@ export function ChatApp() {
                 <div className="flex items-center gap-2">
                   <a
                     className="btn btn-ghost btn-sm"
-                    href={`${API_BASE}/debug/hybrid-retrieval-doc`}
+                    href={guideHref}
                     target="_blank"
                     rel="noreferrer"
                   >

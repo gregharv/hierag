@@ -46,13 +46,19 @@ Render:
 
 ```bash
 cd docs
-quarto render hybrid-retrieval.qmd --to html --output hybrid-retrieval.html
+quarto render
 ```
 
 Open:
 
-- `docs/hybrid-retrieval.html`
-- `http://localhost:8510/api/debug/hybrid-retrieval-doc`
+- `http://localhost:8510/connections/reference`
+- `http://localhost:8510/connections/reference/hybrid-retrieval`
+- `http://localhost:8510/connections/reference/core-directory-diagram`
+- `http://localhost:8510/connections/reference/tutorials/01_analysis`
+
+Per-page URL pattern:
+
+- `http://localhost:8510/connections/reference/<doc-slug>`
 
 ## Verification Pattern
 

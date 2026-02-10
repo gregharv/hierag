@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -29,6 +29,8 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "interfaces" / "client" / "dist"
+DOCS_DIR = PROJECT_ROOT / "docs"
+DOCS_SITE_DIR = DOCS_DIR / "_site"
 HYBRID_RETRIEVAL_DOC = PROJECT_ROOT / "HYBRID_RETRIEVAL.md"
 HYBRID_RETRIEVAL_QUARTO = PROJECT_ROOT / "docs" / "hybrid-retrieval.qmd"
 HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
@@ -189,6 +191,207 @@ def _render_hybrid_doc_quarto() -> bool:
         return False
 
     return HYBRID_RETRIEVAL_QUARTO_HTML.exists()
+
+
+def _render_docs_site_quarto() -> bool:
+    if not DOCS_DIR.exists():
+        return False
+
+    quarto_bin = shutil.which("quarto")
+    if not quarto_bin:
+        return False
+
+    site_index = DOCS_SITE_DIR / "index.html"
+    needs_render = not site_index.exists()
+    if not needs_render:
+        source_files = []
+        for path in DOCS_DIR.rglob("*"):
+            if not path.is_file():
+                continue
+            if DOCS_SITE_DIR in path.parents:
+                continue
+            if (DOCS_DIR / ".quarto") in path.parents:
+                continue
+            if path.suffix.lower() in {".qmd", ".md", ".ipynb", ".yml", ".yaml"}:
+                source_files.append(path)
+
+        if source_files:
+            newest_source = max(path.stat().st_mtime for path in source_files)
+            rendered_files = [path for path in DOCS_SITE_DIR.rglob("*") if path.is_file()]
+            if not rendered_files:
+                needs_render = True
+            else:
+                newest_rendered = max(path.stat().st_mtime for path in rendered_files)
+                needs_render = newest_rendered < newest_source
+
+    if not needs_render:
+        return True
+
+    try:
+        subprocess.run(
+            [quarto_bin, "render"],
+            cwd=str(DOCS_DIR),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+    return site_index.exists()
+
+
+def _resolve_docs_site_file(doc_path: str) -> Path | None:
+    if not DOCS_SITE_DIR.exists():
+        return None
+
+    normalized = doc_path.strip("/")
+    if normalized == "hybrid-retrieval-doc":
+        normalized = "hybrid-retrieval"
+
+    candidates = ["index.html"] if not normalized else [
+        normalized,
+        f"{normalized}.html",
+        f"{normalized}/index.html",
+    ]
+
+    site_root = DOCS_SITE_DIR.resolve()
+    for candidate in candidates:
+        resolved = (DOCS_SITE_DIR / candidate).resolve()
+        if not resolved.is_relative_to(site_root):
+            continue
+        if resolved.is_file():
+            return resolved
+
+    return None
+
+
+def _resolve_docs_root_file(doc_path: str) -> Path | None:
+    if not DOCS_DIR.exists():
+        return None
+
+    normalized = doc_path.strip("/")
+    if normalized == "hybrid-retrieval-doc":
+        normalized = "hybrid-retrieval"
+
+    candidates = [] if not normalized else [
+        f"{normalized}.html",
+        f"{normalized}/index.html",
+        f"{normalized}/README.md",
+    ]
+
+    docs_root = DOCS_DIR.resolve()
+    for candidate in candidates:
+        resolved = (DOCS_DIR / candidate).resolve()
+        if not resolved.is_relative_to(docs_root):
+            continue
+        if resolved.is_file():
+            return resolved
+
+    return None
+
+
+def _inject_reference_link_rewrites(html_text: str) -> str:
+    script = """
+<script>
+(function () {
+  function canonicalize(pathname) {
+    let rel = null;
+    if (pathname === "/reference" || pathname === "/reference/") {
+      rel = "";
+    } else if (pathname.startsWith("/reference/")) {
+      rel = pathname.slice("/reference/".length);
+    } else if (pathname === "/connections/reference" || pathname === "/connections/reference/") {
+      rel = "";
+    } else if (pathname.startsWith("/connections/reference/")) {
+      rel = pathname.slice("/connections/reference/".length);
+    } else {
+      return null;
+    }
+
+    if (rel.startsWith("site_libs/") || rel === "search.json") {
+      return null;
+    }
+    if (rel.endsWith("index.html")) {
+      rel = rel.slice(0, -("index.html".length));
+    } else if (rel.endsWith(".html")) {
+      rel = rel.slice(0, -(".html".length));
+    }
+    while (rel.startsWith("/")) {
+      rel = rel.slice(1);
+    }
+    while (rel.endsWith("/")) {
+      rel = rel.slice(0, -1);
+    }
+    return rel ? "/connections/reference/" + rel : "/connections/reference/";
+  }
+
+  const anchors = document.querySelectorAll("a[href]");
+  anchors.forEach((a) => {
+    const raw = a.getAttribute("href");
+    if (!raw || raw.startsWith("#") || raw.startsWith("mailto:") || raw.startsWith("tel:")) {
+      return;
+    }
+
+    let resolved;
+    try {
+      resolved = new URL(raw, window.location.href);
+    } catch (err) {
+      return;
+    }
+    if (resolved.origin !== window.location.origin) {
+      return;
+    }
+
+    const canonical = canonicalize(resolved.pathname);
+    if (!canonical) {
+      return;
+    }
+
+    const finalHref = canonical + resolved.search + resolved.hash;
+    a.setAttribute("href", finalHref);
+    a.setAttribute("target", "_top");
+  });
+})();
+</script>
+""".strip()
+
+    body_close = "</body>"
+    if body_close in html_text:
+        return html_text.replace(body_close, f"{script}\n{body_close}", 1)
+    return f"{html_text}\n{script}"
+
+
+def _serve_connections_docs(doc_path: str):
+    if _render_docs_site_quarto():
+        rendered = _resolve_docs_site_file(doc_path)
+        if rendered is not None:
+            if rendered.suffix.lower() == ".html":
+                rendered_html = rendered.read_text(encoding="utf-8")
+                patched_html = _inject_reference_link_rewrites(rendered_html)
+                return HTMLResponse(patched_html)
+            return FileResponse(rendered)
+
+    fallback = _resolve_docs_root_file(doc_path)
+    if fallback is not None:
+        if fallback.suffix.lower() == ".html":
+            fallback_html = fallback.read_text(encoding="utf-8")
+            patched_html = _inject_reference_link_rewrites(fallback_html)
+            return HTMLResponse(patched_html)
+        if fallback.suffix.lower() == ".md":
+            markdown_text = fallback.read_text(encoding="utf-8")
+            escaped = html.escape(markdown_text)
+            return HTMLResponse(
+                "<!doctype html><html><head><meta charset='utf-8'/>"
+                f"<title>{fallback.name}</title></head><body><pre>{escaped}</pre></body></html>"
+            )
+        return FileResponse(fallback)
+
+    normalized = doc_path.strip("/")
+    if normalized in {"", "hybrid-retrieval", "hybrid-retrieval-doc"}:
+        return get_hybrid_retrieval_doc()
+
+    raise HTTPException(status_code=404, detail="Documentation page not found")
 
 
 app = FastAPI(title="hierag-api")
@@ -543,6 +746,29 @@ def get_hybrid_retrieval_doc() -> HTMLResponse:
 </html>
 """
     return HTMLResponse(page)
+
+
+@app.get("/reference")
+@app.get("/reference/")
+@app.get("/connections/reference")
+@app.get("/connections/reference/")
+def connections_docs_index(request: Request):
+    if not request.url.path.endswith("/"):
+        return RedirectResponse(url=f"{request.url.path}/", status_code=307)
+
+    return _serve_connections_docs("")
+
+
+@app.get("/reference/{doc_path:path}")
+@app.get("/connections/reference/{doc_path:path}")
+def connections_docs(doc_path: str):
+    return _serve_connections_docs(doc_path)
+
+
+@app.get("/hybrid-retrieval-doc")
+@app.get("/connections/hybrid-retrieval-doc")
+def get_hybrid_retrieval_doc_legacy() -> RedirectResponse:
+    return RedirectResponse(url="reference/hybrid-retrieval", status_code=307)
 
 
 @api.post("/feedback")

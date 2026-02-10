@@ -1,9 +1,65 @@
 [
   {
-    "objectID": "../core-directory-diagram.html",
-    "href": "../core-directory-diagram.html",
+    "objectID": "tutorials/01_analysis.html",
+    "href": "tutorials/01_analysis.html",
+    "title": "Data Analysis Playground",
+    "section": "",
+    "text": "Use this notebook for exploration only. Keep app logic in core/.\n\nprint(\"Playground ready\")"
+  },
+  {
+    "objectID": "hybrid-retrieval.html",
+    "href": "hybrid-retrieval.html",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "This project uses a hybrid retriever in 05_llmapi.py to rank chunks.\nAt a high level: 1. Vector search finds semantically similar chunks. 2. BM25 finds keyword/term matches. 3. Fusion combines both into one final score.\n\n\n\n\n\nVector search answers:\n“Which chunks mean something similar to the query?”\n\n\n\n\nThe query is expanded into variants (for synonyms, if configured).\nEach query variant is converted into an embedding vector.\nEvery stored chunk already has an embedding vector.\nFor each chunk, we compute similarity using dot product.\nIf there are multiple query variants, we keep the max similarity for that chunk.\nWe take the top vector candidates (VECTOR_CANDIDATE_K, default 50).\n\n\n\n\n\nA raw vector score per chunk (vector_score_raw).\nA list of top vector candidates.\n\n\n\n\n\n\n\n\nBM25 answers:\n“Which chunks contain the query terms in useful frequency/positions (keyword relevance)?”\n\n\n\n\nQuery text is tokenized (lowercased word-like tokens).\nChunk text is tokenized in advance and cached.\nFor each query term and chunk, BM25 uses:\n\nterm frequency in that chunk,\ndocument frequency across corpus,\nchunk length normalization.\n\nIDF is computed as:\n\nidf = log(1 + (N - df + 0.5) / (df + 0.5))\n\nBM25 parameters used:\n\nBM25_K1 = 1.5\nBM25_B = 0.75\n\nWe take top BM25 candidates (BM25_CANDIDATE_K, default 50).\n\n\n\n\n\nA raw BM25 score per chunk (bm25_score_raw).\nA list of top BM25 candidates.\n\n\n\n\n\n\n\n\n\nVector is strong for meaning/paraphrases.\nBM25 is strong for exact term hits.\nEither one alone can miss good results.\n\nFusion blends both strengths.\n\n\n\n\nCandidate set = union of:\n\ntop vector candidates\ntop BM25 candidates\n\nFor each candidate chunk, collect:\n\nraw vector score\nraw BM25 score\n\nNormalize each score type independently using min-max on candidate set:\n\nnorm = (x - min) / (max - min)\nIf all values are equal, normalized values become 0.\n\nCompute final fusion score:\n\nfusion = FUSION_ALPHA * vector_norm + (1 - FUSION_ALPHA) * bm25_norm\nCurrent default: - FUSION_ALPHA = 0.70\n(70% semantic signal, 30% lexical signal)\n\nSort by fusion descending and return top top_k.\n\n\n\n\n\n\nAssume one candidate chunk has: - vector_norm = 0.80 - bm25_norm = 0.50 - FUSION_ALPHA = 0.70\nThen:\nfusion = 0.70 * 0.80 + 0.30 * 0.50 = 0.56 + 0.15 = 0.71\nSo final rank uses 0.71.\n\n\n\n\nIn debug output/page, each ranked chunk can show: - from_vector (was it in vector top candidates?) - from_bm25 (was it in BM25 top candidates?) - vector_score_raw - bm25_score_raw - vector_score_norm - bm25_score_norm - final score (fusion score)\nSo you can inspect exactly why a chunk ranked where it did."
+  },
+  {
+    "objectID": "hybrid-retrieval.html#vector-search-semantic-similarity",
+    "href": "hybrid-retrieval.html#vector-search-semantic-similarity",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "Vector search answers:\n“Which chunks mean something similar to the query?”\n\n\n\n\nThe query is expanded into variants (for synonyms, if configured).\nEach query variant is converted into an embedding vector.\nEvery stored chunk already has an embedding vector.\nFor each chunk, we compute similarity using dot product.\nIf there are multiple query variants, we keep the max similarity for that chunk.\nWe take the top vector candidates (VECTOR_CANDIDATE_K, default 50).\n\n\n\n\n\nA raw vector score per chunk (vector_score_raw).\nA list of top vector candidates."
+  },
+  {
+    "objectID": "hybrid-retrieval.html#bm25-search-lexical-keyword-matching",
+    "href": "hybrid-retrieval.html#bm25-search-lexical-keyword-matching",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "BM25 answers:\n“Which chunks contain the query terms in useful frequency/positions (keyword relevance)?”\n\n\n\n\nQuery text is tokenized (lowercased word-like tokens).\nChunk text is tokenized in advance and cached.\nFor each query term and chunk, BM25 uses:\n\nterm frequency in that chunk,\ndocument frequency across corpus,\nchunk length normalization.\n\nIDF is computed as:\n\nidf = log(1 + (N - df + 0.5) / (df + 0.5))\n\nBM25 parameters used:\n\nBM25_K1 = 1.5\nBM25_B = 0.75\n\nWe take top BM25 candidates (BM25_CANDIDATE_K, default 50).\n\n\n\n\n\nA raw BM25 score per chunk (bm25_score_raw).\nA list of top BM25 candidates."
+  },
+  {
+    "objectID": "hybrid-retrieval.html#fusion-combine-vector-bm25",
+    "href": "hybrid-retrieval.html#fusion-combine-vector-bm25",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "Vector is strong for meaning/paraphrases.\nBM25 is strong for exact term hits.\nEither one alone can miss good results.\n\nFusion blends both strengths.\n\n\n\n\nCandidate set = union of:\n\ntop vector candidates\ntop BM25 candidates\n\nFor each candidate chunk, collect:\n\nraw vector score\nraw BM25 score\n\nNormalize each score type independently using min-max on candidate set:\n\nnorm = (x - min) / (max - min)\nIf all values are equal, normalized values become 0.\n\nCompute final fusion score:\n\nfusion = FUSION_ALPHA * vector_norm + (1 - FUSION_ALPHA) * bm25_norm\nCurrent default: - FUSION_ALPHA = 0.70\n(70% semantic signal, 30% lexical signal)\n\nSort by fusion descending and return top top_k."
+  },
+  {
+    "objectID": "hybrid-retrieval.html#example-simple",
+    "href": "hybrid-retrieval.html#example-simple",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "Assume one candidate chunk has: - vector_norm = 0.80 - bm25_norm = 0.50 - FUSION_ALPHA = 0.70\nThen:\nfusion = 0.70 * 0.80 + 0.30 * 0.50 = 0.56 + 0.15 = 0.71\nSo final rank uses 0.71."
+  },
+  {
+    "objectID": "hybrid-retrieval.html#what-you-see-in-debug",
+    "href": "hybrid-retrieval.html#what-you-see-in-debug",
+    "title": "Hybrid Retrieval Guide",
+    "section": "",
+    "text": "In debug output/page, each ranked chunk can show: - from_vector (was it in vector top candidates?) - from_bm25 (was it in BM25 top candidates?) - vector_score_raw - bm25_score_raw - vector_score_norm - bm25_score_norm - final score (fusion score)\nSo you can inspect exactly why a chunk ranked where it did."
+  },
+  {
+    "objectID": "core-directory-diagram.html",
+    "href": "core-directory-diagram.html",
     "title": "Core Directory Diagram",
     "section": "",
     "text": "Core Module Dependency Graph\n\n\n\n\n\nflowchart LR\n  subgraph core[\"core/\"]\n    init[\"__init__.py\"]\n    crawl[\"crawl.py\"]\n    deps[\"deps.py\"]\n    embed[\"embed.py\"]\n    fastlite_db[\"fastlite_db.py\"]\n    llmapi[\"llmapi.py\"]\n    llmapi_flow[\"llmapi_flow.py\"]\n    llmapi_retrieval[\"llmapi_retrieval.py\"]\n    llmapi_shared[\"llmapi_shared.py\"]\n    models[\"models.py\"]\n    parse_content[\"parse_content.py\"]\n    scrape[\"scrape.py\"]\n    service[\"service.py\"]\n    site_config[\"site_config.py\"]\n  end\n\n  crawl --&gt; fastlite_db\n  deps --&gt; service\n  embed --&gt; fastlite_db\n  fastlite_db --&gt; site_config\n  llmapi --&gt; llmapi_flow\n  llmapi --&gt; llmapi_retrieval\n  llmapi --&gt; llmapi_shared\n  llmapi_flow --&gt; fastlite_db\n  llmapi_flow --&gt; llmapi_retrieval\n  llmapi_flow --&gt; llmapi_shared\n  llmapi_flow --&gt; service\n  llmapi_retrieval --&gt; fastlite_db\n  llmapi_retrieval --&gt; llmapi_shared\n  llmapi_shared --&gt; fastlite_db\n  parse_content --&gt; fastlite_db\n  parse_content --&gt; site_config\n  scrape --&gt; fastlite_db\n  service --&gt; models"
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "Hierag Documentation",
+    "section": "",
+    "text": "Hierag Documentation\nUse these docs for architecture notes and retrieval behavior.\n\nCore Directory Diagram\nHybrid Retrieval Guide\nTutorials"
   }
 ]
