@@ -1,0 +1,9 @@
+[
+  {
+    "objectID": "../core-directory-diagram.html",
+    "href": "../core-directory-diagram.html",
+    "title": "Core Directory Diagram",
+    "section": "",
+    "text": "Core Module Dependency Graph\n\n\n\n\n\nflowchart LR\n  subgraph core[\"core/\"]\n    init[\"__init__.py\"]\n    crawl[\"crawl.py\"]\n    deps[\"deps.py\"]\n    embed[\"embed.py\"]\n    fastlite_db[\"fastlite_db.py\"]\n    llmapi[\"llmapi.py\"]\n    llmapi_flow[\"llmapi_flow.py\"]\n    llmapi_retrieval[\"llmapi_retrieval.py\"]\n    llmapi_shared[\"llmapi_shared.py\"]\n    models[\"models.py\"]\n    parse_content[\"parse_content.py\"]\n    scrape[\"scrape.py\"]\n    service[\"service.py\"]\n    site_config[\"site_config.py\"]\n  end\n\n  crawl --&gt; fastlite_db\n  deps --&gt; service\n  embed --&gt; fastlite_db\n  fastlite_db --&gt; site_config\n  llmapi --&gt; llmapi_flow\n  llmapi --&gt; llmapi_retrieval\n  llmapi --&gt; llmapi_shared\n  llmapi_flow --&gt; fastlite_db\n  llmapi_flow --&gt; llmapi_retrieval\n  llmapi_flow --&gt; llmapi_shared\n  llmapi_flow --&gt; service\n  llmapi_retrieval --&gt; fastlite_db\n  llmapi_retrieval --&gt; llmapi_shared\n  llmapi_shared --&gt; fastlite_db\n  parse_content --&gt; fastlite_db\n  parse_content --&gt; site_config\n  scrape --&gt; fastlite_db\n  service --&gt; models"
+  }
+]

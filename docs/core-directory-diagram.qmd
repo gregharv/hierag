@@ -1,0 +1,44 @@
+---
+title: Core Directory Diagram
+---
+
+# Core Module Dependency Graph
+
+```{mermaid}
+flowchart LR
+  subgraph core["core/"]
+    init["__init__.py"]
+    crawl["crawl.py"]
+    deps["deps.py"]
+    embed["embed.py"]
+    fastlite_db["fastlite_db.py"]
+    llmapi["llmapi.py"]
+    llmapi_flow["llmapi_flow.py"]
+    llmapi_retrieval["llmapi_retrieval.py"]
+    llmapi_shared["llmapi_shared.py"]
+    models["models.py"]
+    parse_content["parse_content.py"]
+    scrape["scrape.py"]
+    service["service.py"]
+    site_config["site_config.py"]
+  end
+
+  crawl --> fastlite_db
+  deps --> service
+  embed --> fastlite_db
+  fastlite_db --> site_config
+  llmapi --> llmapi_flow
+  llmapi --> llmapi_retrieval
+  llmapi --> llmapi_shared
+  llmapi_flow --> fastlite_db
+  llmapi_flow --> llmapi_retrieval
+  llmapi_flow --> llmapi_shared
+  llmapi_flow --> service
+  llmapi_retrieval --> fastlite_db
+  llmapi_retrieval --> llmapi_shared
+  llmapi_shared --> fastlite_db
+  parse_content --> fastlite_db
+  parse_content --> site_config
+  scrape --> fastlite_db
+  service --> models
+```

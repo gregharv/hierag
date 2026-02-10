@@ -1,0 +1,11 @@
+---
+title: Hierag Documentation
+---
+
+# Hierag Documentation
+
+Use these docs for architecture notes and retrieval behavior.
+
+- [Core Directory Diagram](core-directory-diagram.qmd)
+- [Hybrid Retrieval Guide](hybrid-retrieval.qmd)
+- [Tutorials](tutorials/README.md)
