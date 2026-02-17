@@ -6,6 +6,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from typing import Dict, Iterable, List, Sequence
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 import numpy as np
 
@@ -68,6 +69,43 @@ def _query_embeddings(queries: Iterable[str]) -> np.ndarray:
 
 def _tokenize_for_bm25(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def canonicalize_source_url(url: str) -> str:
+    """Normalize source URLs so encoded/decoded and fragment variants dedupe."""
+    value = str(url or "").strip()
+    if not value:
+        return ""
+
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return value
+
+    scheme = (parsed.scheme or "https").lower()
+    netloc = (parsed.netloc or "").lower()
+    path = unquote(parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/") or "/"
+
+    query_items = parse_qs(parsed.query, keep_blank_values=False)
+    docs_values = query_items.get("docs") or []
+    docs_value = next((unquote(str(v)).strip().strip("/") for v in docs_values if str(v).strip()), "")
+    if docs_value:
+        docs_norm = quote(docs_value, safe="/-._~")
+        return f"{scheme}://{netloc}{path}?docs={docs_norm}"
+
+    pairs: list[tuple[str, str]] = []
+    for key in sorted(query_items.keys()):
+        norm_key = unquote(str(key)).strip()
+        if not norm_key:
+            continue
+        for val in query_items.get(key) or []:
+            pairs.append((norm_key, unquote(str(val)).strip()))
+    query = urlencode(pairs, doseq=True, safe="/-._~")
+    if query:
+        return f"{scheme}://{netloc}{path}?{query}"
+    return f"{scheme}://{netloc}{path}"
 
 
 def _build_retrieval_cache(db):
@@ -246,6 +284,7 @@ def search_embeddings_with_debug(db, query, top_k=5):
             "chunk_id": chunk_id,
             "extract_id": int(extract["id"]),
             "url": page["url"],
+            "url_canonical": canonicalize_source_url(page["url"]),
             "from_vector": idx in vector_set,
             "from_bm25": idx in bm25_set,
             "vector_score_raw": float(vector_scores[idx]),
@@ -309,21 +348,31 @@ def get_parent_extracts(db, scored_results, max_extracts=None):
     t0 = time.perf_counter()
     extracts = []
     seen_extract_ids = set()
+    seen_urls = set()
 
     for score, chunk_id in scored_results:
         chunk = db.t.chunks[chunk_id]
         extract_id = chunk["extract_id"]
         if extract_id in seen_extract_ids:
             continue
-        seen_extract_ids.add(extract_id)
 
         extract = db.t.extracts[extract_id]
+        page = db.t.pages[extract["page_id"]]
+        url_canonical = canonicalize_source_url(page["url"])
+        if url_canonical and url_canonical in seen_urls:
+            continue
+
+        seen_extract_ids.add(extract_id)
+        if url_canonical:
+            seen_urls.add(url_canonical)
         extracts.append(
             {
                 "score": score,
                 "chunk_id": chunk_id,
                 "extract_id": extract_id,
                 "text": extract["text"].strip(),
+                "url": page["url"],
+                "url_canonical": url_canonical,
             }
         )
 
@@ -348,22 +397,30 @@ def build_context(extracts, glossary: Iterable[str] | None = None):
 def build_source_links(db, scored_results, max_sources=3, score_details: Dict[int, Dict] | None = None):
     sources = []
     seen_extract_ids = set()
+    seen_urls = set()
 
     for score, chunk_id in scored_results:
         chunk = db.t.chunks[chunk_id]
         extract_id = chunk["extract_id"]
         if extract_id in seen_extract_ids:
             continue
-        seen_extract_ids.add(extract_id)
 
         extract = db.t.extracts[extract_id]
         page = db.t.pages[extract["page_id"]]
         url = page["url"]
+        url_canonical = canonicalize_source_url(url)
+        if url_canonical and url_canonical in seen_urls:
+            continue
+
+        seen_extract_ids.add(extract_id)
+        if url_canonical:
+            seen_urls.add(url_canonical)
         source = {
             "score": score,
             "chunk_id": chunk_id,
             "extract_id": extract_id,
             "url": url,
+            "url_canonical": url_canonical,
             "last_scraped": page.get("last_scraped"),
         }
         if score_details:
@@ -411,7 +468,11 @@ if __name__ == "__main__":
     assert _tokenize_for_bm25("Hello, World 123!") == ["hello", "world", "123"]
     normalized = _min_max_normalize(np.array([1.0, 3.0], dtype=np.float32))
     assert normalized.tolist() == [0.0, 1.0]
+    encoded_url = "https://connections/?docs=residential%2Fmyway%2Ftopic#tab"
+    decoded_url = "https://connections/?docs=residential/myway/topic"
+    assert canonicalize_source_url(encoded_url) == canonicalize_source_url(decoded_url)
     sources = build_source_links(test_db, [(0.9, chunk["id"])], max_sources=1)
     assert len(sources) == 1 and sources[0]["url"] == "https://example.com/doc"
+    assert sources[0]["url_canonical"] == "https://example.com/doc"
     assert sources[0]["last_scraped"] == "now"
     print("Check Passed")

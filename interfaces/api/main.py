@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 try:
     from core import service
+    from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.release_info import get_release_info
 except ImportError:
@@ -26,6 +27,7 @@ except ImportError:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     from core import service
+    from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.release_info import get_release_info
 
@@ -136,6 +138,65 @@ def _resolve_uvicorn_app_target() -> str:
         if importlib.util.find_spec(module_name) is not None:
             return f"{module_name}:app"
     return "api.main:app"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def _run_startup_url_cleanup(scraper_db) -> None:
+    cleanup_enabled = _env_bool("HIERAG_URL_CLEANUP_ON_STARTUP", True)
+    if not cleanup_enabled:
+        print("Startup URL cleanup: disabled")
+        return
+
+    site_id = _env_int("HIERAG_URL_CLEANUP_SITE_ID", 2)
+    drop_non_target = _env_bool("HIERAG_URL_CLEANUP_DROP_NON_TARGET", False)
+    try:
+        actions, stats = plan_pages_cleanup(
+            scraper_db,
+            site_id=site_id,
+            drop_non_target=drop_non_target,
+        )
+        print(
+            "Startup URL cleanup plan: "
+            f"site_id={site_id} "
+            f"planned_deletes={stats.get('planned_deletes', 0)} "
+            f"planned_updates={stats.get('planned_updates', 0)}"
+        )
+        if not actions:
+            print("Startup URL cleanup: no actions required")
+            return
+
+        applied = apply_pages_actions(scraper_db, actions)
+        print(
+            "Startup URL cleanup applied: "
+            f"deleted={applied.get('deleted', 0)} "
+            f"updated={applied.get('updated', 0)} "
+            f"skipped={applied.get('skipped', 0)}"
+        )
+
+        try:
+            llmapi = _load_llmapi()
+            llmapi.refresh_retrieval_cache()
+            print("Startup URL cleanup: retrieval cache refreshed")
+        except Exception as exc:
+            print(f"Startup URL cleanup: retrieval cache refresh skipped: {exc}")
+    except Exception as exc:
+        print(f"Startup URL cleanup skipped: {exc}")
 
 
 def _clean_ip(value: str) -> str:
@@ -492,6 +553,7 @@ api = APIRouter(prefix="/api")
 
 @app.on_event("startup")
 def _startup() -> None:
+    global _SCRAPER_DB
     service.create_db_and_tables()
     # Avoid write-lock startup failures when scraper.db is shared by another process.
     seed_on_startup = os.getenv("HIERAG_SEED_SCRAPER_ON_STARTUP", "").lower() in {
@@ -499,7 +561,8 @@ def _startup() -> None:
         "true",
         "yes",
     }
-    bootstrap_scraper_db(seed=seed_on_startup)
+    _SCRAPER_DB = bootstrap_scraper_db(seed=seed_on_startup)
+    _run_startup_url_cleanup(_SCRAPER_DB)
 
 
 @api.get("/profile")

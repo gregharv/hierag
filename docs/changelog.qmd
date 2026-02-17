@@ -11,6 +11,13 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.1
+
+- **Date (UTC):** 2026-02-17
+- **Changed:** Added conditional glossary injection, dual retrieval merge for rewritten queries, runtime URL-canonical dedupe for sources/context, and startup URL cleanup with fail-open behavior.
+- **Why it matters:** Reduces MyWay/Prepay topic bleed into unrelated answers, lowers rewrite-driven retrieval drift, and prevents duplicate encoded/decoded sources from dominating rankings.
+- **Affected areas:** `core/llmapi_flow.py`, `core/llmapi_retrieval.py`, `interfaces/api/main.py`, `interfaces/api/tests/test_api.py`, `core/tests/test_llmapi_flow.py`, `core/tests/test_llmapi_retrieval.py`
+
 ## v0.1.0
 
 - **Date (UTC):** 2026-02-10

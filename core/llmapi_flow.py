@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Dict, Generator
 
@@ -30,6 +31,11 @@ except ImportError:
 
 QUERY_REWRITE_MODEL = "gpt-5-nano"
 QUERY_REWRITE_HISTORY_LIMIT = 20
+QUERY_GLOSSARY_TERMS = ("myway", "prepay", "prepaid")
+RETRIEVAL_ORIGINAL_WEIGHT = 0.65
+RETRIEVAL_REWRITTEN_WEIGHT = 0.35
+RETRIEVAL_EXPANDED_MIN_TOP_K = 40
+RETRIEVAL_EXPANDED_MULTIPLIER = 4
 
 
 def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[dict]:
@@ -69,6 +75,225 @@ def _build_llm_prompt(query: str, context: str) -> tuple[str, str]:
     )
     user_text = f"Question: {query}\n\nContext:\n{context}"
     return system_text, user_text
+
+
+def _normalize_query_text(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _query_changed(original_query: str, effective_query: str) -> bool:
+    return _normalize_query_text(original_query) != _normalize_query_text(effective_query)
+
+
+def _expanded_retrieval_top_k(top_k: int, max_extracts: int) -> int:
+    top_k = int(top_k or 0)
+    max_extracts = int(max_extracts or 0)
+    return max(top_k, max_extracts * RETRIEVAL_EXPANDED_MULTIPLIER, RETRIEVAL_EXPANDED_MIN_TOP_K)
+
+
+def _glossary_debug(original_query: str, effective_query: str) -> dict:
+    query_text = f"{original_query} {effective_query}".strip().lower()
+    trigger_terms = sorted(
+        {
+            term
+            for term in QUERY_GLOSSARY_TERMS
+            if re.search(rf"\b{re.escape(term)}\b", query_text)
+        }
+    )
+    included = bool(trigger_terms)
+    return {
+        "included": included,
+        "trigger_terms": trigger_terms,
+        "reason": "query_term_match" if included else "no_match",
+    }
+
+
+def _summarize_retrieval_debug(debug_payload: dict | None) -> dict:
+    if not isinstance(debug_payload, dict):
+        return {}
+    return {k: v for k, v in debug_payload.items() if k != "by_chunk_id"}
+
+
+def _single_retrieval_payload(original_query: str, original_debug: dict) -> dict:
+    payload = dict(original_debug or {})
+    payload["strategy"] = "single_original"
+    payload["merge_weights"] = {"original": 1.0, "rewritten": 0.0}
+    payload["query"] = original_query
+    payload["original"] = _summarize_retrieval_debug(original_debug)
+    payload["rewritten"] = None
+    return payload
+
+
+def _scores_by_chunk(scored_results: list[tuple[float, int]]) -> dict[int, float]:
+    scores: dict[int, float] = {}
+    for score, chunk_id in scored_results or []:
+        cid = int(chunk_id)
+        value = float(score)
+        if cid not in scores or value > scores[cid]:
+            scores[cid] = value
+    return scores
+
+
+def _merge_retrieval_payload(
+    original_query: str,
+    effective_query: str,
+    original_scored: list[tuple[float, int]],
+    original_debug: dict,
+    rewritten_scored: list[tuple[float, int]],
+    rewritten_debug: dict,
+    top_k: int,
+) -> tuple[list[tuple[float, int]], dict]:
+    original_scores = _scores_by_chunk(original_scored)
+    rewritten_scores = _scores_by_chunk(rewritten_scored)
+    original_details = (original_debug or {}).get("by_chunk_id", {}) or {}
+    rewritten_details = (rewritten_debug or {}).get("by_chunk_id", {}) or {}
+
+    merged_scores: list[tuple[float, int]] = []
+    merged_details: dict[int, dict] = {}
+    chunk_ids = sorted(set(original_scores.keys()) | set(rewritten_scores.keys()))
+    for chunk_id in chunk_ids:
+        original_score = float(original_scores.get(chunk_id, 0.0))
+        rewritten_score = float(rewritten_scores.get(chunk_id, 0.0))
+        merged_score = (RETRIEVAL_ORIGINAL_WEIGHT * original_score) + (
+            RETRIEVAL_REWRITTEN_WEIGHT * rewritten_score
+        )
+        merged_scores.append((merged_score, chunk_id))
+
+        original_component = RETRIEVAL_ORIGINAL_WEIGHT * original_score
+        rewritten_component = RETRIEVAL_REWRITTEN_WEIGHT * rewritten_score
+        base_detail = original_details.get(chunk_id) if original_component >= rewritten_component else rewritten_details.get(chunk_id)
+        if not base_detail:
+            base_detail = original_details.get(chunk_id) or rewritten_details.get(chunk_id) or {}
+
+        detail = dict(base_detail)
+        detail["score_original"] = original_score if chunk_id in original_scores else None
+        detail["score_rewritten"] = rewritten_score if chunk_id in rewritten_scores else None
+        detail["score_merged"] = merged_score
+        detail["from_original_query"] = chunk_id in original_scores
+        detail["from_rewritten_query"] = chunk_id in rewritten_scores
+        merged_details[int(chunk_id)] = detail
+
+    merged_scores.sort(key=lambda item: item[0], reverse=True)
+    merged_scores = merged_scores[: int(top_k)]
+
+    ranked_chunks = []
+    for rank, (score, chunk_id) in enumerate(merged_scores, start=1):
+        detail = merged_details.get(int(chunk_id), {})
+        ranked_chunks.append(
+            {
+                "rank": rank,
+                "score": float(score),
+                "chunk_id": int(chunk_id),
+                "extract_id": detail.get("extract_id"),
+                "url": detail.get("url"),
+                "url_canonical": detail.get("url_canonical"),
+                "from_vector": bool(detail.get("from_vector")),
+                "from_bm25": bool(detail.get("from_bm25")),
+                "vector_score_raw": detail.get("vector_score_raw"),
+                "bm25_score_raw": detail.get("bm25_score_raw"),
+                "vector_score_norm": detail.get("vector_score_norm"),
+                "bm25_score_norm": detail.get("bm25_score_norm"),
+                "chunk_preview": detail.get("chunk_preview"),
+                "score_original": detail.get("score_original"),
+                "score_rewritten": detail.get("score_rewritten"),
+                "from_original_query": bool(detail.get("from_original_query")),
+                "from_rewritten_query": bool(detail.get("from_rewritten_query")),
+            }
+        )
+
+    original_summary = _summarize_retrieval_debug(original_debug)
+    rewritten_summary = _summarize_retrieval_debug(rewritten_debug)
+    original_counts = (original_summary.get("candidate_counts") or {}) if original_summary else {}
+    rewritten_counts = (rewritten_summary.get("candidate_counts") or {}) if rewritten_summary else {}
+    original_timings = (original_summary.get("timings") or {}) if original_summary else {}
+    rewritten_timings = (rewritten_summary.get("timings") or {}) if rewritten_summary else {}
+
+    query_variants = []
+    seen_variants = set()
+    for summary in (original_summary, rewritten_summary):
+        for variant in summary.get("query_variants") or []:
+            key = str(variant).strip()
+            if not key or key in seen_variants:
+                continue
+            seen_variants.add(key)
+            query_variants.append(key)
+
+    merged_payload = {
+        "query": effective_query,
+        "query_variants": query_variants,
+        "config": dict(original_summary.get("config") or rewritten_summary.get("config") or {}),
+        "candidate_counts": {
+            "vector": max(
+                int(original_counts.get("vector") or 0),
+                int(rewritten_counts.get("vector") or 0),
+            ),
+            "bm25": max(
+                int(original_counts.get("bm25") or 0),
+                int(rewritten_counts.get("bm25") or 0),
+            ),
+            "merged": len(chunk_ids),
+        },
+        "timings": {
+            "vector_s": float(original_timings.get("vector_s") or 0.0)
+            + float(rewritten_timings.get("vector_s") or 0.0),
+            "bm25_s": float(original_timings.get("bm25_s") or 0.0)
+            + float(rewritten_timings.get("bm25_s") or 0.0),
+            "fusion_s": float(original_timings.get("fusion_s") or 0.0)
+            + float(rewritten_timings.get("fusion_s") or 0.0),
+            "total_s": float(original_timings.get("total_s") or 0.0)
+            + float(rewritten_timings.get("total_s") or 0.0),
+        },
+        "ranked_chunks": ranked_chunks,
+        "by_chunk_id": merged_details,
+        "strategy": "dual_merge",
+        "merge_weights": {
+            "original": RETRIEVAL_ORIGINAL_WEIGHT,
+            "rewritten": RETRIEVAL_REWRITTEN_WEIGHT,
+        },
+        "original": original_summary,
+        "rewritten": rewritten_summary,
+        "query_original": original_query,
+        "query_rewritten": effective_query,
+    }
+    return merged_scores, merged_payload
+
+
+def _run_retrieval_strategy(
+    db,
+    original_query: str,
+    effective_query: str,
+    retrieval_top_k: int,
+) -> tuple[list[tuple[float, int]], dict]:
+    original_scored, original_debug = search_embeddings_with_debug(
+        db,
+        original_query,
+        top_k=retrieval_top_k,
+    )
+    rewrite_changed = _query_changed(original_query, effective_query)
+    if not rewrite_changed:
+        return original_scored, _single_retrieval_payload(original_query, original_debug)
+
+    try:
+        rewritten_scored, rewritten_debug = search_embeddings_with_debug(
+            db,
+            effective_query,
+            top_k=retrieval_top_k,
+        )
+    except Exception as exc:
+        fallback_payload = _single_retrieval_payload(original_query, original_debug)
+        fallback_payload["rewrite_retrieval_error"] = str(exc)
+        fallback_payload["query_rewritten"] = effective_query
+        return original_scored, fallback_payload
+
+    return _merge_retrieval_payload(
+        original_query=original_query,
+        effective_query=effective_query,
+        original_scored=original_scored,
+        original_debug=original_debug,
+        rewritten_scored=rewritten_scored,
+        rewritten_debug=rewritten_debug,
+        top_k=retrieval_top_k,
+    )
 
 
 def _clean_history(history: list[dict] | None, limit: int = QUERY_REWRITE_HISTORY_LIMIT) -> list[dict]:
@@ -157,10 +382,18 @@ def rewrite_query_with_history(query: str, history: list[dict] | None = None) ->
 def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None):
     """Search, gather context, and ask the LLM to answer."""
     t0 = time.perf_counter()
-    effective_query, _ = rewrite_query_with_history(query, history=history)
-    scored, retrieval_debug = search_embeddings_with_debug(db, effective_query, top_k=top_k)
+    original_query = str(query or "").strip()
+    effective_query, _ = rewrite_query_with_history(original_query, history=history)
+    retrieval_top_k = _expanded_retrieval_top_k(top_k=top_k, max_extracts=max_extracts)
+    scored, retrieval_debug = _run_retrieval_strategy(
+        db,
+        original_query=original_query,
+        effective_query=effective_query,
+        retrieval_top_k=retrieval_top_k,
+    )
     extracts = get_parent_extracts(db, scored, max_extracts=max_extracts)
-    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS)
+    glossary = _glossary_debug(original_query=original_query, effective_query=effective_query)
+    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS if glossary["included"] else None)
     if not context:
         print("No context available to send to the LLM.")
         return None
@@ -206,10 +439,19 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
     t0 = time.perf_counter()
     original_query = str(query or "").strip()
     effective_query, rewrite_debug = rewrite_query_with_history(original_query, history=history)
+    retrieval_top_k = _expanded_retrieval_top_k(top_k=top_k, max_extracts=max_extracts)
+    glossary = _glossary_debug(original_query=original_query, effective_query=effective_query)
 
-    cached = app_db.get_cache_answer(effective_query)
-    if not cached and effective_query != original_query:
-        cached = app_db.get_cache_answer(original_query)
+    cache_lookup_order = [original_query]
+    cache_hit_query = None
+    cached = app_db.get_cache_answer(original_query)
+    if cached:
+        cache_hit_query = original_query
+    elif _query_changed(original_query, effective_query):
+        cache_lookup_order.append(effective_query)
+        cached = app_db.get_cache_answer(effective_query)
+        if cached:
+            cache_hit_query = effective_query
 
     if cached:
         sources = []
@@ -236,6 +478,13 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 "query_rewrite": rewrite_debug,
                 "cached": True,
                 "cache_id": cached.get("id"),
+                "cache": {
+                    "hit": True,
+                    "cache_id": cached.get("id"),
+                    "lookup_order": cache_lookup_order,
+                    "hit_query": cache_hit_query,
+                },
+                "glossary": glossary,
                 "retrieval": None,
                 "sources": sources,
                 "llm_request": None,
@@ -246,9 +495,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         yield {"type": "done"}
         return
 
-    scored, retrieval_debug = search_embeddings_with_debug(db, effective_query, top_k=top_k)
+    scored, retrieval_debug = _run_retrieval_strategy(
+        db,
+        original_query=original_query,
+        effective_query=effective_query,
+        retrieval_top_k=retrieval_top_k,
+    )
     extracts = get_parent_extracts(db, scored, max_extracts=max_extracts)
-    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS)
+    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS if glossary["included"] else None)
     score_details = retrieval_debug.get("by_chunk_id", {})
     sources = build_source_links(
         db,
@@ -257,6 +511,7 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         score_details=score_details,
     )
     sources = _hydrate_sources_with_last_scraped(db, sources)
+    retrieval_debug_summary = _summarize_retrieval_debug(retrieval_debug)
 
     if not context:
         yield {
@@ -275,7 +530,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 ),
                 "query_rewrite": rewrite_debug,
                 "cached": False,
-                "retrieval": {k: v for k, v in retrieval_debug.items() if k != "by_chunk_id"},
+                "cache": {
+                    "hit": False,
+                    "cache_id": None,
+                    "lookup_order": cache_lookup_order,
+                    "hit_query": None,
+                },
+                "glossary": glossary,
+                "retrieval": retrieval_debug_summary,
                 "sources": sources,
                 "llm_request": None,
                 "llm_response_text": "",
@@ -323,7 +585,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
             ),
             "query_rewrite": rewrite_debug,
             "cached": False,
-            "retrieval": {k: v for k, v in retrieval_debug.items() if k != "by_chunk_id"},
+            "cache": {
+                "hit": False,
+                "cache_id": None,
+                "lookup_order": cache_lookup_order,
+                "hit_query": None,
+            },
+            "glossary": glossary,
+            "retrieval": retrieval_debug_summary,
             "sources": sources,
             "llm_request": {
                 "model": LLM_MODEL,

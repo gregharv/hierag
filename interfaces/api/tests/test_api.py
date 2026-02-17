@@ -18,6 +18,7 @@ def client(tmp_path, monkeypatch):
     scraper_db_path = tmp_path / "test_scraper.db"
     monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
     monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "0")
 
     import interfaces.api.main as main
     import core.service as service
@@ -28,6 +29,72 @@ def client(tmp_path, monkeypatch):
 
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+def test_startup_cleanup_executes_and_refreshes_cache(tmp_path, monkeypatch):
+    db_path = tmp_path / "startup_app.db"
+    scraper_db_path = tmp_path / "startup_scraper.db"
+    monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
+    monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "1")
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_SITE_ID", "2")
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_DROP_NON_TARGET", "0")
+
+    import interfaces.api.main as main
+    import core.service as service
+
+    importlib.reload(service)
+    importlib.reload(main)
+
+    calls = {"plan": 0, "apply": 0, "refresh": 0}
+
+    def fake_plan(db, site_id=None, drop_non_target=False):
+        calls["plan"] += 1
+        assert site_id == 2
+        assert drop_non_target is False
+        return [object()], {"planned_deletes": 1, "planned_updates": 0}
+
+    def fake_apply(db, actions):
+        calls["apply"] += 1
+        assert len(actions) == 1
+        return {"deleted": 1, "updated": 0, "skipped": 0}
+
+    class FakeLLM:
+        def refresh_retrieval_cache(self):
+            calls["refresh"] += 1
+
+    monkeypatch.setattr(main, "plan_pages_cleanup", fake_plan)
+    monkeypatch.setattr(main, "apply_pages_actions", fake_apply)
+    monkeypatch.setattr(main, "_load_llmapi", lambda: FakeLLM())
+
+    with TestClient(main.app) as test_client:
+        response = test_client.get("/api/profile")
+        assert response.status_code == 200
+
+    assert calls == {"plan": 1, "apply": 1, "refresh": 1}
+
+
+def test_startup_cleanup_fail_open_when_cleanup_raises(tmp_path, monkeypatch):
+    db_path = tmp_path / "startup_fail_app.db"
+    scraper_db_path = tmp_path / "startup_fail_scraper.db"
+    monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
+    monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "1")
+
+    import interfaces.api.main as main
+    import core.service as service
+
+    importlib.reload(service)
+    importlib.reload(main)
+
+    def fake_plan(*args, **kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(main, "plan_pages_cleanup", fake_plan)
+
+    with TestClient(main.app) as test_client:
+        response = test_client.get("/api/profile")
+        assert response.status_code == 200
 
 
 def test_profile_endpoint(client: TestClient):
