@@ -48,8 +48,14 @@ function createMockFetch(mode = "default") {
           content:
             "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
           sources: [
-            { url: "https://example.com/docs/hybrid-search" },
-            { url: "https://example.com/docs/chunking" },
+            {
+              url: "https://example.com/docs/hybrid-search",
+              last_scraped: "2026-01-27T15:37:14.208027",
+            },
+            {
+              url: "https://example.com/docs/chunking",
+              last_scraped: "2026-01-27T15:18:01.337120",
+            },
           ],
           has_debug: true,
         },
@@ -156,7 +162,14 @@ function createMockFetch(mode = "default") {
         { type: "delta", payload: { text: answer } },
         {
           type: "sources",
-          payload: { sources: [{ url: "https://example.com/mock-source" }] },
+          payload: {
+            sources: [
+              {
+                url: "https://example.com/mock-source",
+                last_scraped: "2026-01-27T15:37:14.208027",
+              },
+            ],
+          },
         },
         { type: "debug", payload: { ready: true } },
         { type: "done", payload: {} },
@@ -177,6 +190,16 @@ function createMockFetch(mode = "default") {
       return toJsonResponse({
         debug: {
           query: "How can we improve retrieval quality?",
+          query_effective:
+            "How can we improve retrieval quality for our pipeline using the prior conversation context?",
+          query_rewritten:
+            "Based on our prior discussion on retrieval failures, how can we improve retrieval quality for our pipeline?",
+          query_rewrite: {
+            used: true,
+            reason: "used",
+            model: "gpt-5-nano",
+            history_turns: 4,
+          },
           retrieval: {
             candidate_counts: { vector: 8, bm25: 8, merged: 12 },
             ranked_chunks: [
@@ -201,6 +224,7 @@ function createMockFetch(mode = "default") {
               vector_score_raw: 0.88,
               bm25_score_raw: 8.4,
               url: "https://example.com/docs/hybrid-search",
+              last_scraped: "2026-01-27T15:37:14.208027",
             },
           ],
           llm_request: {

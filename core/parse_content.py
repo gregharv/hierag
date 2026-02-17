@@ -279,32 +279,46 @@ def create_chunks_from_extract(extract_text, max_chunk_len=1000):
     return chunks
 
 
-def process_all_pages_to_extracts_and_chunks(db, clear_existing=True, use_upsert=False):
+def _clear_page_extracts_and_chunks(db, page_id: int) -> None:
+    existing_extracts = list(db.t.extracts.rows_where("page_id=?", [page_id]))
+    if not existing_extracts:
+        return
+
+    for extract in existing_extracts:
+        for chunk in db.t.chunks.rows_where("extract_id=?", [extract["id"]]):
+            db.t.chunks.delete(chunk["id"])
+    for extract in existing_extracts:
+        db.t.extracts.delete(extract["id"])
+
+
+def process_pages_to_extracts_and_chunks(db, page_ids, clear_existing=True, use_upsert=False):
     """
-    Convert all pages into extracts + chunks and store in DB.
+    Convert selected pages into extracts + chunks and store in DB.
     """
-    all_pages = list(db.t.pages())
     total_extracts = 0
     total_chunks = 0
 
-    for page in all_pages:
+    for page_id in page_ids:
+        page = db.t.pages[page_id]
+        if not page:
+            print(f"Warning: Page {page_id} not found")
+            continue
+
         site_id = page["site_id"]
         site = db.t.sites[site_id]
         if not site:
-            print(f"Warning: Site {site_id} not found for page {page['id']}")
+            print(f"Warning: Site {site_id} not found for page {page_id}")
             continue
 
         if clear_existing:
-            existing_extracts = list(db.t.extracts.rows_where("page_id=?", [page["id"]]))
-            if existing_extracts:
-                extract_ids = [extract["id"] for extract in existing_extracts]
-                for extract_id in extract_ids:
-                    for chunk in db.t.chunks.rows_where("extract_id=?", [extract_id]):
-                        db.t.chunks.delete(chunk["id"])
-                for extract in existing_extracts:
-                    db.t.extracts.delete(extract["id"])
+            _clear_page_extracts_and_chunks(db, page["id"])
 
-        extracts = create_extracts_from_page(page["html"], site["selector"], site_id, max_extract_len=100_000)
+        extracts = create_extracts_from_page(
+            page["html"],
+            site["selector"],
+            site_id,
+            max_extract_len=100_000,
+        )
         page_chunks_count = 0
 
         for extract_index, extract_text in enumerate(extracts):
@@ -346,6 +360,19 @@ def process_all_pages_to_extracts_and_chunks(db, clear_existing=True, use_upsert
     return total_extracts, total_chunks
 
 
+def process_all_pages_to_extracts_and_chunks(db, clear_existing=True, use_upsert=False):
+    """
+    Convert all pages into extracts + chunks and store in DB.
+    """
+    page_ids = [page["id"] for page in db.t.pages()]
+    return process_pages_to_extracts_and_chunks(
+        db,
+        page_ids,
+        clear_existing=clear_existing,
+        use_upsert=use_upsert,
+    )
+
+
 # %%
 if __name__ == "__main__":
     test_db = bootstrap_scraper_db(":memory:")
@@ -366,7 +393,7 @@ if __name__ == "__main__":
         last_scraped="now",
         last_changed="now",
     )
-    extracts_count, chunks_count = process_all_pages_to_extracts_and_chunks(test_db)
+    extracts_count, chunks_count = process_pages_to_extracts_and_chunks(test_db, [page["id"]])
     assert page["id"] is not None
     assert extracts_count >= 0
     assert chunks_count >= 0

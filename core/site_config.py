@@ -20,6 +20,14 @@ SITES = [
     },
 ]
 
+SITE_CRAWL_URL_POLICIES = {
+    2: {
+        "required_query_key": "docs",
+        "allow_root_seed": True,
+        "allow_root_without_required_query": True,
+    }
+}
+
 
 def get_site_config(site_id: int):
     """Get site configuration by site id."""
@@ -29,8 +37,22 @@ def get_site_config(site_id: int):
     return None
 
 
+def get_crawl_url_policy(site_id: int) -> dict:
+    """Return per-site crawl URL policy; defaults preserve existing behavior."""
+    policy = SITE_CRAWL_URL_POLICIES.get(site_id) or {}
+    return {
+        "required_query_key": str(policy.get("required_query_key") or "").strip(),
+        "allow_root_seed": bool(policy.get("allow_root_seed", False)),
+        "allow_root_without_required_query": bool(
+            policy.get("allow_root_without_required_query", False)
+        ),
+    }
+
+
 # %%
 if __name__ == "__main__":
     assert get_site_config(1)["name"] == "JEA"
     assert get_site_config(999) is None
+    assert get_crawl_url_policy(1)["required_query_key"] == ""
+    assert get_crawl_url_policy(2)["required_query_key"] == "docs"
     print("Check Passed")

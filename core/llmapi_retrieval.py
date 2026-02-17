@@ -364,6 +364,7 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
             "chunk_id": chunk_id,
             "extract_id": extract_id,
             "url": url,
+            "last_scraped": page.get("last_scraped"),
         }
         if score_details:
             detail = score_details.get(int(chunk_id))
@@ -412,4 +413,5 @@ if __name__ == "__main__":
     assert normalized.tolist() == [0.0, 1.0]
     sources = build_source_links(test_db, [(0.9, chunk["id"])], max_sources=1)
     assert len(sources) == 1 and sources[0]["url"] == "https://example.com/doc"
+    assert sources[0]["last_scraped"] == "now"
     print("Check Passed")

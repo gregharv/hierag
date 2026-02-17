@@ -36,6 +36,7 @@ HYBRID_RETRIEVAL_QUARTO = PROJECT_ROOT / "docs" / "hybrid-retrieval.qmd"
 HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
 
 _LLMAPI = None
+_SCRAPER_DB = None
 
 
 class ChatCreate(BaseModel):
@@ -68,6 +69,50 @@ def _load_llmapi():
     from core import llmapi as module
     _LLMAPI = module
     return module
+
+
+def _get_scraper_db():
+    global _SCRAPER_DB
+    if _SCRAPER_DB is not None:
+        return _SCRAPER_DB
+
+    _SCRAPER_DB = bootstrap_scraper_db(seed=False)
+    return _SCRAPER_DB
+
+
+def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
+    if not sources:
+        return []
+
+    try:
+        db = _get_scraper_db()
+    except Exception:
+        return sources
+
+    hydrated: list[dict] = []
+    cache: dict[str, str | None] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        item = dict(source)
+        if item.get("last_scraped"):
+            hydrated.append(item)
+            continue
+
+        url = str(item.get("url") or "").strip()
+        if not url:
+            hydrated.append(item)
+            continue
+
+        if url not in cache:
+            row = list(db.t.pages.rows_where("url=?", [url], limit=1))
+            cache[url] = row[0].get("last_scraped") if row else None
+        if cache[url]:
+            item["last_scraped"] = cache[url]
+        hydrated.append(item)
+
+    return hydrated
 
 
 def _resolve_uvicorn_app_target() -> str:
@@ -148,6 +193,41 @@ def _avatar_from_ip(ip: str) -> dict[str, str]:
 
 def _user_id(request: Request) -> int:
     return service.get_or_create_user_by_ip(_client_ip(request))
+
+
+def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int = 50) -> list[dict[str, str]]:
+    rows = service.list_recent_messages(chat_id=chat_id, limit=limit)
+    if not rows:
+        return []
+
+    assistant_message = service.get_message(assistant_message_id) or {}
+    assistant_created_at = assistant_message.get("created_at")
+    current_user_message_id = None
+    if assistant_created_at:
+        current_user = service.get_prev_user_message(chat_id, assistant_created_at)
+        if current_user:
+            current_user_message_id = current_user.get("id")
+
+    history: list[dict[str, str]] = []
+    for row in rows:
+        if row.get("id") == assistant_message_id:
+            continue
+        if current_user_message_id is not None and row.get("id") == current_user_message_id:
+            continue
+
+        created_at = row.get("created_at") or ""
+        if assistant_created_at and created_at and created_at > assistant_created_at:
+            continue
+
+        role = row.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = (row.get("content") or "").strip()
+        if not content:
+            continue
+        history.append({"role": role, "content": content})
+
+    return history
 
 
 def _render_hybrid_doc_quarto() -> bool:
@@ -496,6 +576,7 @@ def list_messages(chat_id: int, request: Request, limit: int = 20) -> dict[str, 
                 sources = json.loads(row["sources_json"])
             except Exception:
                 sources = []
+        sources = _hydrate_sources_with_last_scraped(sources)
         messages.append(
             {
                 "id": row["id"],
@@ -557,6 +638,7 @@ def stream(
         raise HTTPException(status_code=404, detail="Chat not found")
 
     llmapi = _load_llmapi()
+    history = _build_rewrite_history(chat_id=chat_id, assistant_message_id=message_id)
 
     def event_stream():
         full_text = ""
@@ -565,7 +647,12 @@ def stream(
         debug_payload = None
 
         try:
-            for event in llmapi.stream_answer_with_context(message, top_k=10, max_extracts=6):
+            for event in llmapi.stream_answer_with_context(
+                message,
+                top_k=10,
+                max_extracts=6,
+                history=history,
+            ):
                 etype = event.get("type")
                 if etype == "delta":
                     delta = event.get("text", "")
@@ -802,6 +889,7 @@ def feedback(payload: FeedbackCreate, request: Request) -> dict[str, bool]:
             sources = json.loads(msg["sources_json"])
         except Exception:
             sources = []
+    sources = _hydrate_sources_with_last_scraped(sources)
 
     if payload.rating == 1:
         service.upsert_cache_good(question, msg.get("content", ""), sources)

@@ -60,6 +60,13 @@
     "href": "index.html",
     "title": "Hierag Documentation",
     "section": "",
-    "text": "Hierag Documentation\nUse these docs for architecture notes and retrieval behavior.\n\nCore Directory Diagram\nHybrid Retrieval Guide\nTutorials"
+    "text": "Use these docs for architecture notes and retrieval behavior.\n\n\n\n01 Analysis\nCore Directory Diagram\nCrawl, Scrape, Parse, and Embed Pipeline\nHybrid Retrieval Guide\ntutorials/README"
+  },
+  {
+    "objectID": "index.html#available-docs",
+    "href": "index.html#available-docs",
+    "title": "Hierag Documentation",
+    "section": "",
+    "text": "01 Analysis\nCore Directory Diagram\nCrawl, Scrape, Parse, and Embed Pipeline\nHybrid Retrieval Guide\ntutorials/README"
   }
 ]

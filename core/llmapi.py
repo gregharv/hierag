@@ -3,6 +3,7 @@ from __future__ import annotations
 from .llmapi_flow import (
     _build_llm_prompt,
     _event_get,
+    rewrite_query_with_history as _rewrite_query_with_history,
     answer_query_with_context as _answer_query_with_context,
     stream_answer_with_context as _stream_answer_with_context,
 )
@@ -40,14 +41,31 @@ def refresh_retrieval_cache():
     return _refresh_retrieval_cache(db)
 
 
-def answer_query_with_context(query, top_k=10, max_extracts=6):
+def answer_query_with_context(query, top_k=10, max_extracts=6, history=None):
     """Compatibility wrapper preserving previous call signature."""
-    return _answer_query_with_context(db, query, top_k=top_k, max_extracts=max_extracts)
+    return _answer_query_with_context(
+        db,
+        query,
+        top_k=top_k,
+        max_extracts=max_extracts,
+        history=history,
+    )
 
 
-def stream_answer_with_context(query, top_k=10, max_extracts=6):
+def stream_answer_with_context(query, top_k=10, max_extracts=6, history=None):
     """Compatibility wrapper preserving previous call signature."""
-    return _stream_answer_with_context(db, query, top_k=top_k, max_extracts=max_extracts)
+    return _stream_answer_with_context(
+        db,
+        query,
+        top_k=top_k,
+        max_extracts=max_extracts,
+        history=history,
+    )
+
+
+def rewrite_query_with_history(query, history=None):
+    """Compatibility wrapper for contextual query rewrite."""
+    return _rewrite_query_with_history(query, history=history)
 
 
 __all__ = [
@@ -75,6 +93,7 @@ __all__ = [
     "db",
     "get_parent_extracts",
     "refresh_retrieval_cache",
+    "rewrite_query_with_history",
     "search_embeddings",
     "search_embeddings_with_debug",
     "stream_answer_with_context",

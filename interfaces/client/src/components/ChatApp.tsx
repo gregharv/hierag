@@ -85,6 +85,22 @@ function domainFromUrl(url) {
   }
 }
 
+function formatLastScraped(value) {
+  if (!value || typeof value !== "string") return "unknown";
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleString();
+  }
+  return value;
+}
+
+function sourceHoverTitle(source) {
+  const domain = domainFromUrl(source.url || "");
+  const label = domain || source.url || "source";
+  const lastScraped = formatLastScraped(source.last_scraped);
+  return `${label}\nLast scraped: ${lastScraped}`;
+}
+
 function scoringGuideHref() {
   const guidePath = "/connections/reference/hybrid-retrieval";
   try {
@@ -541,6 +557,14 @@ export function ChatApp() {
     const sources = debugPayload.sources || [];
     const llmRequest = debugPayload.llm_request || {};
     const responseText = debugPayload.llm_response_text || "";
+    const queryEffective = debugPayload.query_effective || debugPayload.query || "";
+    const queryRewritten = debugPayload.query_rewritten || "";
+    const queryRewrite = debugPayload.query_rewrite || {};
+    const rewriteUsed = Boolean(queryRewrite.used);
+    const rewriteReason = queryRewrite.reason || (rewriteUsed ? "used" : "not_available");
+    const rewriteModel = queryRewrite.model || "-";
+    const rewriteHistoryTurns = queryRewrite.history_turns ?? "-";
+    const rewriteError = queryRewrite.error || "";
 
     return (
       <div className="min-h-screen bg-base-200 p-4 md:p-6">
@@ -589,6 +613,48 @@ export function ChatApp() {
                 <div className="card-body">
                   <h2 className="card-title text-base">Question</h2>
                   <pre className="debug-pre">{debugPayload.query || "-"}</pre>
+                </div>
+              </div>
+
+              <div className="card bg-base-100 border border-base-300 shadow-sm">
+                <div className="card-body">
+                  <h2 className="card-title text-base">Query Rewrite</h2>
+                  <div className="overflow-x-auto">
+                    <table className="table table-sm">
+                      <tbody>
+                        <tr>
+                          <th>Status</th>
+                          <td>{rewriteUsed ? "rewritten" : "not rewritten"}</td>
+                        </tr>
+                        <tr>
+                          <th>Reason</th>
+                          <td>{rewriteReason}</td>
+                        </tr>
+                        <tr>
+                          <th>Model</th>
+                          <td>{rewriteModel}</td>
+                        </tr>
+                        <tr>
+                          <th>History turns</th>
+                          <td>{String(rewriteHistoryTurns)}</td>
+                        </tr>
+                        {rewriteError ? (
+                          <tr>
+                            <th>Error</th>
+                            <td className="text-error">{rewriteError}</td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
+                  <h3 className="font-semibold text-sm mt-2">Effective Query Used for Retrieval</h3>
+                  <pre className="debug-pre">{queryEffective || "-"}</pre>
+                  {queryRewritten ? (
+                    <>
+                      <h3 className="font-semibold text-sm mt-3">Rewritten Standalone Query</h3>
+                      <pre className="debug-pre">{queryRewritten}</pre>
+                    </>
+                  ) : null}
                 </div>
               </div>
 
@@ -852,6 +918,7 @@ export function ChatApp() {
                                     target="_blank"
                                     rel="noreferrer"
                                     className="avatar"
+                                    title={sourceHoverTitle(source)}
                                   >
                                     <img
                                       src={`https://www.google.com/s2/favicons?domain=${domain}&sz=64`}

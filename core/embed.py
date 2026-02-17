@@ -19,19 +19,17 @@ def _get_model() -> SentenceTransformer:
     return _MODEL
 
 
-def generate_embeddings_for_chunks(db, batch_size=64):
-    chunks = list(db.t.chunks())
-    chunks_without_embeddings = [
-        chunk
-        for chunk in chunks
-        if not list(db.t.embeddings.rows_where("chunk_id=?", [chunk["id"]]))
-    ]
+def _chunks_needing_embeddings(db, chunks):
+    embedded_chunk_ids = {row["chunk_id"] for row in db.t.embeddings()}
+    return [chunk for chunk in chunks if chunk["id"] not in embedded_chunk_ids]
 
-    print(f"Total chunks: {len(chunks)}")
-    print(f"Chunks without embeddings: {len(chunks_without_embeddings)}")
+
+def _encode_and_store_embeddings(db, chunks_without_embeddings, batch_size=64):
     if not chunks_without_embeddings:
-        print("All chunks already have embeddings")
-        return
+        print("All requested chunks already have embeddings")
+        return 0
+
+    inserted = 0
 
     model = _get_model()
     texts = [chunk["text"] for chunk in chunks_without_embeddings]
@@ -51,8 +49,37 @@ def generate_embeddings_for_chunks(db, batch_size=64):
                 chunk_id=chunk["id"],
                 embedding=embedding.tobytes(),
             )
+            inserted += 1
 
         print(f"Processed {min(i + batch_size, len(texts))}/{len(texts)} chunks")
+    return inserted
+
+
+def generate_embeddings_for_chunks(db, batch_size=64):
+    chunks = list(db.t.chunks())
+    chunks_without_embeddings = _chunks_needing_embeddings(db, chunks)
+
+    print(f"Total chunks: {len(chunks)}")
+    print(f"Chunks without embeddings: {len(chunks_without_embeddings)}")
+    return _encode_and_store_embeddings(db, chunks_without_embeddings, batch_size=batch_size)
+
+
+def generate_embeddings_for_chunk_ids(db, chunk_ids, batch_size=64):
+    unique_ids = sorted({int(chunk_id) for chunk_id in chunk_ids})
+    if not unique_ids:
+        print("No chunk IDs provided")
+        return 0
+
+    chunks = []
+    for chunk_id in unique_ids:
+        chunk = db.t.chunks[chunk_id]
+        if chunk:
+            chunks.append(chunk)
+
+    chunks_without_embeddings = _chunks_needing_embeddings(db, chunks)
+    print(f"Requested chunks: {len(chunks)}")
+    print(f"Chunks without embeddings: {len(chunks_without_embeddings)}")
+    return _encode_and_store_embeddings(db, chunks_without_embeddings, batch_size=batch_size)
 
 
 def show_sample_embedding(db, chunk_id=None):
