@@ -1,0 +1,19 @@
+---
+title: Changelog
+
+This page tracks user-visible updates. Entries are listed newest first.
+
+## Entry Template
+
+- **Version:** `vX.Y.Z`
+- **Date (UTC):** `YYYY-MM-DD`
+- **Changed:** What changed at a high level.
+- **Why it matters:** User impact or expected behavior difference.
+- **Affected areas:** Main files/components touched.
+
+## v0.1.0
+
+- **Date (UTC):** 2026-02-10
+- **Changed:** Implemented contextual query rewrite handling for multi-turn chat.
+- **Why it matters:** Reduces ambiguity in answers and improves consistency when users ask follow-up questions.
+- **Affected areas:** `core/llmapi_flow.py`, `core/llmapi.py`, `interfaces/api/main.py`

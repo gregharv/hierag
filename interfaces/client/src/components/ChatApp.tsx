@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { MoreVertical, Pencil, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
 
 marked.setOptions({ breaks: true });
 
@@ -138,6 +139,8 @@ export function ChatApp() {
   const [searchQuery, setSearchQuery] = useState("");
   const [profile, setProfile] = useState(null);
   const [profiles, setProfiles] = useState([]);
+  const [releaseInfo, setReleaseInfo] = useState(null);
+  const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
   const [profileOverride, setProfileOverride] = useState(
     () => window.localStorage.getItem("profileIp") || ""
   );
@@ -429,6 +432,46 @@ export function ChatApp() {
     };
     loadProfile();
     loadProfiles();
+  }, [apiFetch]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadReleaseInfo = async () => {
+      try {
+        const res = await apiFetch("/release");
+        if (!res.ok) {
+          throw new Error("Release info unavailable");
+        }
+
+        const data = await res.json();
+        const version = typeof data.version === "string" ? data.version.trim() : "";
+        const changelogUrl =
+          typeof data.changelog_url === "string" && data.changelog_url.trim()
+            ? data.changelog_url.trim()
+            : CHANGELOG_FALLBACK_HREF;
+
+        if (!cancelled) {
+          if (version) {
+            setReleaseInfo({ version, changelogUrl });
+            setReleaseLoadFailed(false);
+          } else {
+            setReleaseInfo(null);
+            setReleaseLoadFailed(true);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setReleaseInfo(null);
+          setReleaseLoadFailed(true);
+        }
+      }
+    };
+
+    loadReleaseInfo();
+    return () => {
+      cancelled = true;
+    };
   }, [apiFetch]);
 
   useEffect(() => {
@@ -810,7 +853,29 @@ export function ChatApp() {
             <MenuIcon />
           </label>
           <div className="px-4 text-xl font-semibold">Chat</div>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            {releaseInfo ? (
+              <a
+                className="btn btn-ghost btn-sm normal-case"
+                href={releaseInfo.changelogUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="View changelog"
+              >
+                v{releaseInfo.version}
+              </a>
+            ) : null}
+            {!releaseInfo && releaseLoadFailed ? (
+              <a
+                className="btn btn-ghost btn-sm normal-case"
+                href={CHANGELOG_FALLBACK_HREF}
+                target="_blank"
+                rel="noreferrer"
+                title="View changelog"
+              >
+                Changelog
+              </a>
+            ) : null}
             {profile && profile.avatar ? (
               <div className="dropdown dropdown-end">
                 <button

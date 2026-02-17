@@ -20,12 +20,14 @@ from pydantic import BaseModel
 try:
     from core import service
     from core.fastlite_db import bootstrap_scraper_db
+    from core.release_info import get_release_info
 except ImportError:
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     from core import service
     from core.fastlite_db import bootstrap_scraper_db
+    from core.release_info import get_release_info
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "interfaces" / "client" / "dist"
@@ -356,6 +358,7 @@ def _resolve_docs_root_file(doc_path: str) -> Path | None:
 
     candidates = [] if not normalized else [
         f"{normalized}.html",
+        f"{normalized}.qmd",
         f"{normalized}/index.html",
         f"{normalized}/README.md",
     ]
@@ -458,7 +461,7 @@ def _serve_connections_docs(doc_path: str):
             fallback_html = fallback.read_text(encoding="utf-8")
             patched_html = _inject_reference_link_rewrites(fallback_html)
             return HTMLResponse(patched_html)
-        if fallback.suffix.lower() == ".md":
+        if fallback.suffix.lower() in {".md", ".qmd"}:
             markdown_text = fallback.read_text(encoding="utf-8")
             escaped = html.escape(markdown_text)
             return HTMLResponse(
@@ -504,6 +507,11 @@ def profile(request: Request) -> dict[str, object]:
     ip = _client_ip(request)
     avatar = _avatar_from_ip(ip)
     return {"ip": ip, "avatar": avatar}
+
+
+@api.get("/release")
+def release() -> dict[str, str]:
+    return get_release_info()
 
 
 @api.get("/profiles")

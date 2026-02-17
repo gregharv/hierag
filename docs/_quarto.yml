@@ -7,6 +7,8 @@ website:
     left:
       - href: index.qmd
         text: Home
+      - href: changelog.qmd
+        text: Changelog
       - href: crawl-scrape-parse-embed.qmd
         text: Crawl/Scrape/Parse/Embed
       - href: hybrid-retrieval.qmd

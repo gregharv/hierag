@@ -38,6 +38,21 @@ def test_profile_endpoint(client: TestClient):
     assert "avatar" in payload
 
 
+def test_release_endpoint(client: TestClient):
+    response = client.get("/api/release")
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload.get("version"), str)
+    assert payload["version"].strip()
+    assert payload.get("changelog_url") == "/connections/reference/changelog"
+
+
+def test_changelog_page_route(client: TestClient):
+    response = client.get("/connections/reference/changelog")
+    assert response.status_code == 200
+    assert "Changelog" in response.text
+
+
 def test_chat_lifecycle(client: TestClient):
     create_response = client.post(
         "/api/chats",

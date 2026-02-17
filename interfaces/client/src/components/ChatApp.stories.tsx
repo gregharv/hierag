@@ -240,6 +240,13 @@ function createMockFetch(mode = "default") {
       return toJsonResponse(state.profile);
     }
 
+    if (path === "/api/release" && method === "GET") {
+      return toJsonResponse({
+        version: "0.1.0",
+        changelog_url: "/connections/reference/changelog",
+      });
+    }
+
     if (path === "/api/profiles" && method === "GET") {
       return toJsonResponse({ profiles: state.profiles });
     }
