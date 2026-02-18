@@ -29,37 +29,78 @@ function toSseResponse(events) {
 }
 
 function createMockFetch(mode = "default") {
+  const defaultSources = [
+    {
+      url: "https://connections/?docs=residential%2Fbilling-payments-refunds%2Fpayment-arrangement-b%2Fbroken-payment-arrangement",
+      last_scraped: "2026-01-27T15:37:14.208027",
+    },
+    {
+      url: "https://connections/?docs=residential/billing-payments-refunds/payment-arrangement-b/re-working-a-payment-arrangement",
+      last_scraped: "2026-01-27T15:18:01.337120",
+    },
+    {
+      url: "https://connections/?docs=residential/billing-payments-refunds/payment-arrangement-b/broken-payment-arrangement",
+      last_scraped: "2026-01-27T15:37:14.208027",
+    },
+  ];
+  const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
+  const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
+  const chatOneMessages =
+    mode === "source-collapse"
+      ? [
+          {
+            id: 1001,
+            role: "user",
+            content: "How can we improve retrieval quality?",
+            sources: [],
+          },
+          {
+            id: 1002,
+            role: "assistant",
+            content:
+              "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
+            sources: seedAssistantSources,
+            has_debug: true,
+          },
+          {
+            id: 1003,
+            role: "user",
+            content: "What should we do next for query rewrite and source quality?",
+            sources: [],
+          },
+          {
+            id: 1004,
+            role: "assistant",
+            content:
+              "Use dual retrieval pass analysis and monitor overlap per turn to confirm source freshness.",
+            sources: streamSources,
+            has_debug: true,
+          },
+        ]
+      : [
+          {
+            id: 1001,
+            role: "user",
+            content: "How can we improve retrieval quality?",
+            sources: [],
+          },
+          {
+            id: 1002,
+            role: "assistant",
+            content:
+              "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
+            sources: seedAssistantSources,
+            has_debug: true,
+          },
+        ];
+
   const state = {
     chats: [
       { id: 1, title: "RAG tuning notes" },
       { id: 2, title: "Weekly ops review" },
     ],
     messagesByChat: {
-      1: [
-        {
-          id: 1001,
-          role: "user",
-          content: "How can we improve retrieval quality?",
-          sources: [],
-        },
-        {
-          id: 1002,
-          role: "assistant",
-          content:
-            "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
-          sources: [
-            {
-              url: "https://example.com/docs/hybrid-search",
-              last_scraped: "2026-01-27T15:37:14.208027",
-            },
-            {
-              url: "https://example.com/docs/chunking",
-              last_scraped: "2026-01-27T15:18:01.337120",
-            },
-          ],
-          has_debug: true,
-        },
-      ],
+      1: chatOneMessages,
       2: [],
     },
     profiles: [
@@ -163,12 +204,7 @@ function createMockFetch(mode = "default") {
         {
           type: "sources",
           payload: {
-            sources: [
-              {
-                url: "https://example.com/mock-source",
-                last_scraped: "2026-01-27T15:37:14.208027",
-              },
-            ],
+            sources: streamSources,
           },
         },
         { type: "debug", payload: { ready: true } },
@@ -242,7 +278,7 @@ function createMockFetch(mode = "default") {
 
     if (path === "/api/release" && method === "GET") {
       return toJsonResponse({
-        version: "0.1.0",
+        version: "0.1.3",
         changelog_url: "/connections/reference/changelog",
       });
     }
@@ -323,6 +359,34 @@ export const LoadingError: Story = {
       applyStoryUrl("error");
       return (
         <MockAppEnvironment mode="error">
+          <Story />
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const EmptySources: Story = {
+  name: "Empty Sources",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("default");
+      return (
+        <MockAppEnvironment mode="empty-sources">
+          <Story />
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const SourceCollapseDefaults: Story = {
+  name: "Source Collapse Defaults",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("default");
+      return (
+        <MockAppEnvironment mode="source-collapse">
           <Story />
         </MockAppEnvironment>
       );

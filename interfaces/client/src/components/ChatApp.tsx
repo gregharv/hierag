@@ -1,7 +1,15 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { marked } from "marked";
-import { MoreVertical, Pencil, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  MoreVertical,
+  Pencil,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
+} from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
@@ -80,10 +88,105 @@ function PlusIcon({ className }) {
 
 function domainFromUrl(url) {
   try {
-    return new URL(url).hostname;
+    return new URL(url, window.location.origin).hostname;
   } catch {
     return "";
   }
+}
+
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function canonicalSourceKey(source) {
+  const raw = String(source?.url_canonical || source?.url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    parsed.hash = "";
+    const scheme = (parsed.protocol || "https:").toLowerCase();
+    const host = (parsed.host || "").toLowerCase();
+    const pathDecoded = safeDecode(parsed.pathname || "/");
+    const path = pathDecoded === "/" ? "/" : pathDecoded.replace(/\/+$/, "") || "/";
+
+    const docs = parsed.searchParams.get("docs");
+    if (docs) {
+      const docsNorm = safeDecode(docs).trim().replace(/^\/+|\/+$/g, "");
+      if (docsNorm) {
+        return `${scheme}//${host}${path}?docs=${docsNorm.toLowerCase()}`;
+      }
+    }
+
+    const entries = [];
+    for (const [key, value] of parsed.searchParams.entries()) {
+      const k = safeDecode(key).trim().toLowerCase();
+      const v = safeDecode(value).trim().toLowerCase();
+      if (!k) continue;
+      entries.push([k, v]);
+    }
+    entries.sort((a, b) => {
+      if (a[0] === b[0]) return a[1].localeCompare(b[1]);
+      return a[0].localeCompare(b[0]);
+    });
+    if (entries.length === 0) {
+      return `${scheme}//${host}${path}`;
+    }
+    const query = entries.map(([k, v]) => `${k}=${v}`).join("&");
+    return `${scheme}//${host}${path}?${query}`;
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
+function sourceLabelFromUrl(source) {
+  const raw = String(source?.url || source?.url_canonical || "").trim();
+  if (!raw) return "source";
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    const docs = parsed.searchParams.get("docs");
+    if (docs) {
+      const docsPath = safeDecode(docs).trim().replace(/^\/+|\/+$/g, "");
+      if (docsPath) {
+        const parts = docsPath.split("/").filter(Boolean);
+        if (parts.length >= 2) {
+          return `${parts[parts.length - 2]} / ${parts[parts.length - 1]}`;
+        }
+        return parts[0];
+      }
+    }
+    const host = (parsed.hostname || "").replace(/^www\./i, "");
+    const path = safeDecode(parsed.pathname || "").replace(/\/+$/, "");
+    if (!path || path === "/") {
+      return host || raw;
+    }
+    const segments = path.split("/").filter(Boolean);
+    const tail = segments.slice(-2).join(" / ");
+    return host ? `${host} / ${tail}` : tail;
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeMessageSources(sources) {
+  const output = [];
+  const seen = new Set();
+  for (const source of sources || []) {
+    if (!source || typeof source !== "object") continue;
+    const key = canonicalSourceKey(source);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    output.push({
+      ...source,
+      canonical_key: key,
+      label: sourceLabelFromUrl(source),
+      link: source.url || source.url_canonical || "",
+    });
+  }
+  return output;
 }
 
 function formatLastScraped(value) {
@@ -96,10 +199,11 @@ function formatLastScraped(value) {
 }
 
 function sourceHoverTitle(source) {
-  const domain = domainFromUrl(source.url || "");
-  const label = domain || source.url || "source";
+  const domain = domainFromUrl(source.link || source.url || source.url_canonical || "");
+  const label = source.label || domain || source.link || source.url || source.url_canonical || "source";
+  const link = source.link || source.url || source.url_canonical || "";
   const lastScraped = formatLastScraped(source.last_scraped);
-  return `${label}\nLast scraped: ${lastScraped}`;
+  return `${label}\n${link}\nLast scraped: ${lastScraped}`;
 }
 
 function scoringGuideHref() {
@@ -141,6 +245,7 @@ export function ChatApp() {
   const [profiles, setProfiles] = useState([]);
   const [releaseInfo, setReleaseInfo] = useState(null);
   const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
+  const [sourceExpandedByMessage, setSourceExpandedByMessage] = useState({});
   const [profileOverride, setProfileOverride] = useState(
     () => window.localStorage.getItem("profileIp") || ""
   );
@@ -487,6 +592,10 @@ export function ChatApp() {
   }, [activeChatId]);
 
   useEffect(() => {
+    setSourceExpandedByMessage({});
+  }, [activeChatId]);
+
+  useEffect(() => {
     const onPopState = () => {
       setActiveChatId(parseChatId());
       setDebugMessageId(parseDebugMessageId());
@@ -592,6 +701,32 @@ export function ChatApp() {
           .includes(normalizedQuery)
       )
     : chats;
+
+  const assistantSourceMeta = {};
+  let previousAssistantSourceKeys = null;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const displaySources = normalizeMessageSources(message.sources || []);
+    const keys = displaySources.map((source) => source.canonical_key);
+    const overlapPrevCount =
+      previousAssistantSourceKeys === null
+        ? null
+        : keys.filter((key) => previousAssistantSourceKeys.has(key)).length;
+    assistantSourceMeta[message.id] = {
+      displaySources,
+      sourceCount: keys.length,
+      overlapPrevCount,
+    };
+    previousAssistantSourceKeys = new Set(keys);
+  }
+  let latestAssistantWithSourcesId = null;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const sourceCount = assistantSourceMeta[message.id]?.sourceCount || 0;
+    if (sourceCount > 0) {
+      latestAssistantWithSourcesId = message.id;
+    }
+  }
 
   if (debugMessageId) {
     const debugPayload = debugState.data?.debug || {};
@@ -954,76 +1089,112 @@ export function ChatApp() {
                 {messages.length === 0 ? (
                   <div className="prose max-w-none">Hi! Ask me anything about your data.</div>
                 ) : (
-                  messages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={`chat ${msg.role === "user" ? "chat-end" : "chat-start"} w-full`}
-                    >
-                      {msg.role === "user" ? (
-                        <div className="chat-bubble chat-bubble-primary whitespace-pre-wrap">
-                          {msg.content}
-                        </div>
-                      ) : (
-                        <div className="w-full">
-                          <div
-                            className="markdown"
-                            dangerouslySetInnerHTML={{
-                              __html: marked.parse(msg.content || ""),
-                            }}
-                          />
-                          {msg.sources && msg.sources.length > 0 && (
-                            <div className="flex gap-2 mt-2">
-                              {msg.sources.map((source, idx) => {
-                                const domain = domainFromUrl(source.url || "");
-                                if (!domain) return null;
-                                return (
+                  messages.map((msg) => {
+                    const sourceInfo = assistantSourceMeta[msg.id] || {
+                      displaySources: [],
+                      sourceCount: 0,
+                      overlapPrevCount: null,
+                    };
+                    const hasSources = sourceInfo.sourceCount > 0;
+                    const hasExplicitExpandState = Object.prototype.hasOwnProperty.call(
+                      sourceExpandedByMessage,
+                      msg.id
+                    );
+                    const isExpanded = hasSources
+                      ? hasExplicitExpandState
+                        ? Boolean(sourceExpandedByMessage[msg.id])
+                        : msg.id === latestAssistantWithSourcesId
+                      : false;
+                    const sourceListId = `assistant-sources-${msg.id}`;
+                    return (
+                      <div
+                        key={msg.id}
+                        className={`chat ${msg.role === "user" ? "chat-end" : "chat-start"} w-full`}
+                      >
+                        {msg.role === "user" ? (
+                          <div className="chat-bubble chat-bubble-primary whitespace-pre-wrap">
+                            {msg.content}
+                          </div>
+                        ) : (
+                          <div className="w-full">
+                            <div
+                              className="markdown"
+                              dangerouslySetInnerHTML={{
+                                __html: marked.parse(msg.content || ""),
+                              }}
+                            />
+                            {hasSources && (
+                              <button
+                                className="btn btn-ghost btn-xs h-auto min-h-0 px-1 py-1 mt-2 normal-case text-xs opacity-80 hover:opacity-100"
+                                type="button"
+                                aria-expanded={isExpanded}
+                                aria-controls={sourceListId}
+                                onClick={() =>
+                                  setSourceExpandedByMessage((prev) => ({
+                                    ...prev,
+                                    [msg.id]: !isExpanded,
+                                  }))
+                                }
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="size-3.5" aria-hidden="true" />
+                                ) : (
+                                  <ChevronRight className="size-3.5" aria-hidden="true" />
+                                )}
+                                <span>
+                                  Sources: {sourceInfo.sourceCount}
+                                  {sourceInfo.overlapPrevCount !== null
+                                    ? ` | Reused from previous answer: ${sourceInfo.overlapPrevCount}`
+                                    : ""}
+                                </span>
+                              </button>
+                            )}
+                            {hasSources && isExpanded && (
+                              <div id={sourceListId} className="flex flex-wrap gap-2 mt-2">
+                                {sourceInfo.displaySources.map((source, idx) => (
                                   <a
-                                    key={`${domain}-${idx}`}
-                                    href={source.url}
+                                    key={`${source.canonical_key}-${idx}`}
+                                    href={source.link}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="avatar"
+                                    className="badge badge-outline gap-1 py-3 px-2 text-xs leading-tight"
                                     title={sourceHoverTitle(source)}
                                   >
-                                    <img
-                                      src={`https://www.google.com/s2/favicons?domain=${domain}&sz=64`}
-                                      alt={domain}
-                                      className="mask mask-squircle w-6 h-6"
-                                    />
+                                    <span className="font-medium">{source.label}</span>
                                   </a>
-                                );
-                              })}
+                                ))}
+                              </div>
+                            )}
+                            <div className="flex gap-2 mt-2">
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => openDebugPage(msg.id)}
+                                disabled={!msg.has_debug}
+                                title={msg.has_debug ? "Open debug details" : "Debug not available yet"}
+                                type="button"
+                              >
+                                Debug
+                              </button>
+                              <button
+                                className="btn btn-square btn-ghost"
+                                onClick={() => sendFeedback(msg.id, 1)}
+                                type="button"
+                              >
+                                <ThumbsUp className="size-[1.2em]" />
+                              </button>
+                              <button
+                                className="btn btn-square btn-ghost"
+                                onClick={() => sendFeedback(msg.id, -1)}
+                                type="button"
+                              >
+                                <ThumbsDown className="size-[1.2em]" />
+                              </button>
                             </div>
-                          )}
-                          <div className="flex gap-2 mt-2">
-                            <button
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => openDebugPage(msg.id)}
-                              disabled={!msg.has_debug}
-                              title={msg.has_debug ? "Open debug details" : "Debug not available yet"}
-                              type="button"
-                            >
-                              Debug
-                            </button>
-                            <button
-                              className="btn btn-square btn-ghost"
-                              onClick={() => sendFeedback(msg.id, 1)}
-                              type="button"
-                            >
-                              <ThumbsUp className="size-[1.2em]" />
-                            </button>
-                            <button
-                              className="btn btn-square btn-ghost"
-                              onClick={() => sendFeedback(msg.id, -1)}
-                              type="button"
-                            >
-                              <ThumbsDown className="size-[1.2em]" />
-                            </button>
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  ))
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
 
