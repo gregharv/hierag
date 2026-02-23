@@ -60,6 +60,25 @@ Per-page URL pattern:
 
 - `http://localhost:8510/connections/reference/<doc-slug>`
 
+## Nightly Connections Refresh
+
+Run refresh manually:
+
+```bash
+uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 3 --prune-status-codes 404,410
+```
+
+Windows scheduler script:
+
+- `scripts/run-nightly-connections-refresh.bat` (primary)
+- `scripts/run-nightly-connections-refresh.cmd` (wrapper to `.bat`)
+- Optional shared Task Scheduler target:
+  - `C:\Users\harvgs-admin\Documents\Python Scripts\hierag_connections_refresh.bat`
+
+Nightly logging outputs:
+
+- Full run log: `data/logs/connections-refresh_<YYYY-MM-DD>_<HHMM>.log`
+
 ## Verification Pattern
 
 - Python files in `core/` include `# %%` script checks.

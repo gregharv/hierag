@@ -49,6 +49,7 @@ class MessageRow(TypedDict):
     stream_id: NotRequired[str | None]
     cached_from: NotRequired[int | None]
     question_norm: NotRequired[str | None]
+    app_version: NotRequired[str | None]
 
 
 class FeedbackRow(TypedDict):
@@ -114,6 +115,7 @@ APP_TABLE_DEFS: dict[str, dict[str, Any]] = {
             "stream_id": str,
             "cached_from": int,
             "question_norm": str,
+            "app_version": str,
         },
         "pk": "id",
         "foreign_keys": [("chat_id", "chats"), ("cached_from", "cache_entries")],
@@ -179,6 +181,7 @@ if __name__ == "__main__":
         created_at="now",
         question_norm="hello",
         cached_from=cache["id"],
+        app_version="0.0.0-test",
     )
     test_db.t.feedback.insert(
         message_id=message["id"],

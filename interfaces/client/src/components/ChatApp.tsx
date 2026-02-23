@@ -13,6 +13,8 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
+const CHAT_TIME_ZONE = "America/New_York";
+const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 
 marked.setOptions({ breaks: true });
 
@@ -189,13 +191,51 @@ function normalizeMessageSources(sources) {
   return output;
 }
 
-function formatLastScraped(value) {
-  if (!value || typeof value !== "string") return "unknown";
-  const parsed = new Date(value);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toLocaleString();
+function parseTimestamp(value) {
+  if (!value || typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw) return null;
+
+  if (ISO_TZ_SUFFIX_RE.test(raw)) {
+    const zoned = new Date(raw);
+    return Number.isNaN(zoned.getTime()) ? null : zoned;
   }
-  return value;
+
+  const normalized = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const utc = new Date(`${normalized}Z`);
+  if (!Number.isNaN(utc.getTime())) {
+    return utc;
+  }
+
+  const fallback = new Date(raw);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+function formatDateTimeEst(value) {
+  if (!value || typeof value !== "string") return "unknown";
+  const parsed = parseTimestamp(value);
+  if (!parsed) {
+    return value;
+  }
+  return parsed.toLocaleString("en-US", {
+    timeZone: CHAT_TIME_ZONE,
+    timeZoneName: "short",
+  });
+}
+
+function formatLastScraped(value) {
+  return formatDateTimeEst(value);
+}
+
+function formatMessageDateTime(value) {
+  return formatDateTimeEst(value);
+}
+
+function formatMessageVersion(value) {
+  if (!value || typeof value !== "string") return "unknown";
+  const clean = value.trim();
+  if (!clean) return "unknown";
+  return clean.toLowerCase().startsWith("v") ? clean : `v${clean}`;
 }
 
 function sourceHoverTitle(source) {
@@ -204,6 +244,11 @@ function sourceHoverTitle(source) {
   const link = source.link || source.url || source.url_canonical || "";
   const lastScraped = formatLastScraped(source.last_scraped);
   return `${label}\n${link}\nLast scraped: ${lastScraped}`;
+}
+
+function releaseHoverTitle(releaseInfo) {
+  const lastCrawled = formatLastScraped(releaseInfo?.lastCrawled || "");
+  return `View changelog\nLast crawled: ${lastCrawled}`;
 }
 
 function scoringGuideHref() {
@@ -487,6 +532,9 @@ export function ChatApp() {
         role: "user",
         content: message,
         sources: [],
+        created_at: data.user_created_at || new Date().toISOString(),
+        question_created_at: data.user_created_at || null,
+        app_version: data.app_version || "",
       };
       const assistantMsg = {
         id: data.assistant_message_id,
@@ -494,6 +542,10 @@ export function ChatApp() {
         content: "",
         sources: [],
         has_debug: false,
+        created_at:
+          data.assistant_created_at || data.user_created_at || new Date().toISOString(),
+        question_created_at: data.question_created_at || data.user_created_at || null,
+        app_version: data.app_version || "",
       };
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       scrollToBottom(true);
@@ -555,10 +607,12 @@ export function ChatApp() {
           typeof data.changelog_url === "string" && data.changelog_url.trim()
             ? data.changelog_url.trim()
             : CHANGELOG_FALLBACK_HREF;
+        const lastCrawled =
+          typeof data.last_crawled === "string" ? data.last_crawled.trim() : "";
 
         if (!cancelled) {
           if (version) {
-            setReleaseInfo({ version, changelogUrl });
+            setReleaseInfo({ version, changelogUrl, lastCrawled });
             setReleaseLoadFailed(false);
           } else {
             setReleaseInfo(null);
@@ -995,7 +1049,7 @@ export function ChatApp() {
                 href={releaseInfo.changelogUrl}
                 target="_blank"
                 rel="noreferrer"
-                title="View changelog"
+                title={releaseHoverTitle(releaseInfo)}
               >
                 v{releaseInfo.version}
               </a>
@@ -1106,6 +1160,10 @@ export function ChatApp() {
                         : msg.id === latestAssistantWithSourcesId
                       : false;
                     const sourceListId = `assistant-sources-${msg.id}`;
+                    const askedAtText = formatMessageDateTime(
+                      msg.question_created_at || msg.created_at || ""
+                    );
+                    const versionText = formatMessageVersion(msg.app_version || "");
                     return (
                       <div
                         key={msg.id}
@@ -1142,7 +1200,8 @@ export function ChatApp() {
                                   <ChevronRight className="size-3.5" aria-hidden="true" />
                                 )}
                                 <span>
-                                  Sources: {sourceInfo.sourceCount}
+                                  Sources: {sourceInfo.sourceCount} | Asked: {askedAtText} | Version:{" "}
+                                  {versionText}
                                   {sourceInfo.overlapPrevCount !== null
                                     ? ` | Reused from previous answer: ${sourceInfo.overlapPrevCount}`
                                     : ""}

@@ -45,6 +45,7 @@ function createMockFetch(mode = "default") {
   ];
   const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
   const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
+  const storyVersion = "0.1.3";
   const chatOneMessages =
     mode === "source-collapse"
       ? [
@@ -53,6 +54,9 @@ function createMockFetch(mode = "default") {
             role: "user",
             content: "How can we improve retrieval quality?",
             sources: [],
+            created_at: "2026-02-23T09:01:00Z",
+            question_created_at: "2026-02-23T09:01:00Z",
+            app_version: storyVersion,
           },
           {
             id: 1002,
@@ -61,12 +65,18 @@ function createMockFetch(mode = "default") {
               "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
             sources: seedAssistantSources,
             has_debug: true,
+            created_at: "2026-02-23T09:01:03Z",
+            question_created_at: "2026-02-23T09:01:00Z",
+            app_version: storyVersion,
           },
           {
             id: 1003,
             role: "user",
             content: "What should we do next for query rewrite and source quality?",
             sources: [],
+            created_at: "2026-02-23T09:02:00Z",
+            question_created_at: "2026-02-23T09:02:00Z",
+            app_version: storyVersion,
           },
           {
             id: 1004,
@@ -75,6 +85,9 @@ function createMockFetch(mode = "default") {
               "Use dual retrieval pass analysis and monitor overlap per turn to confirm source freshness.",
             sources: streamSources,
             has_debug: true,
+            created_at: "2026-02-23T09:02:04Z",
+            question_created_at: "2026-02-23T09:02:00Z",
+            app_version: storyVersion,
           },
         ]
       : [
@@ -83,6 +96,9 @@ function createMockFetch(mode = "default") {
             role: "user",
             content: "How can we improve retrieval quality?",
             sources: [],
+            created_at: "2026-02-23T09:01:00Z",
+            question_created_at: "2026-02-23T09:01:00Z",
+            app_version: storyVersion,
           },
           {
             id: 1002,
@@ -91,6 +107,9 @@ function createMockFetch(mode = "default") {
               "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
             sources: seedAssistantSources,
             has_debug: true,
+            created_at: "2026-02-23T09:01:03Z",
+            question_created_at: "2026-02-23T09:01:00Z",
+            app_version: storyVersion,
           },
         ];
 
@@ -166,12 +185,16 @@ function createMockFetch(mode = "default") {
       const userMessageId = state.nextMessageId++;
       const assistantMessageId = state.nextMessageId++;
       const message = body.message || "";
+      const nowIso = new Date().toISOString();
 
       const userMessage = {
         id: userMessageId,
         role: "user",
         content: message,
         sources: [],
+        created_at: nowIso,
+        question_created_at: nowIso,
+        app_version: storyVersion,
       };
       const assistantMessage = {
         id: assistantMessageId,
@@ -179,6 +202,9 @@ function createMockFetch(mode = "default") {
         content: "",
         sources: [],
         has_debug: true,
+        created_at: nowIso,
+        question_created_at: nowIso,
+        app_version: storyVersion,
       };
 
       if (!state.messagesByChat[chatId]) {
@@ -190,6 +216,10 @@ function createMockFetch(mode = "default") {
           user_message_id: userMessageId,
           assistant_message_id: assistantMessageId,
           stream_id: `stream-${assistantMessageId}`,
+          user_created_at: nowIso,
+          assistant_created_at: nowIso,
+          question_created_at: nowIso,
+          app_version: storyVersion,
         },
         201
       );
@@ -278,8 +308,9 @@ function createMockFetch(mode = "default") {
 
     if (path === "/api/release" && method === "GET") {
       return toJsonResponse({
-        version: "0.1.3",
+        version: storyVersion,
         changelog_url: "/connections/reference/changelog",
+        last_crawled: "2026-02-23T03:15:00Z",
       });
     }
 

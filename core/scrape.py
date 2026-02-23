@@ -111,6 +111,7 @@ def fetch_page(
     url: str,
     verbose: bool = True,
     return_status: bool = False,
+    allow_http_errors: bool = False,
 ):
     """Fetch one URL and insert/update it in pages."""
     site = db.t.sites[site_id]
@@ -119,6 +120,11 @@ def fetch_page(
 
     response = httpx.get(url, timeout=10, follow_redirects=True, verify=False)
     if response.status_code != 200:
+        status = f"http_{response.status_code}"
+        if allow_http_errors:
+            if verbose:
+                print(f"{url}: status {response.status_code}")
+            return (None, status) if return_status else None
         raise RuntimeError(f"{url}: status {response.status_code}")
 
     html = response.text

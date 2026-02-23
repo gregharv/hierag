@@ -1,5 +1,6 @@
 ---
 title: Changelog
+---
 
 This page tracks user-visible updates. Entries are listed newest first.
 
@@ -10,6 +11,13 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Changed:** What changed at a high level.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
+
+## v0.1.6
+
+- **Date (UTC):** 2026-02-23
+- **Changed:** Added startup Quarto docs rendering for reference pages, added nightly connections refresh scripts with stale-page pruning support, and exposed `last_crawled` in release metadata so the version badge hover shows the latest crawl timestamp.
+- **Why it matters:** Reference docs (including changelog) are generated on app load, nightly refresh operations can safely prune removed pages, and operators can quickly verify content freshness from the UI.
+- **Affected areas:** `interfaces/api/main.py`, `core/daily_connections_refresh.py`, `core/fastlite_db.py`, `core/scrape.py`, `interfaces/client/src/components/ChatApp.tsx`, `scripts/run-nightly-connections-refresh.bat`, `scripts/run-nightly-connections-refresh.cmd`, `docs/changelog.qmd`
 
 ## v0.1.5
 

@@ -129,6 +129,12 @@ Recommended command:
 uv run python -m core.daily_connections_refresh --site-id 2 --skip-crawl
 ```
 
+Nightly command with stale-page pruning (safe defaults):
+
+```bash
+uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 3 --prune-status-codes 404,410
+```
+
 URL discovery command (less frequent):
 
 ```bash
@@ -188,17 +194,47 @@ Interpretation:
 
 ## Production Cadence
 
-1. **Daily (or twice daily): refresh existing discovered URLs**
-   - Command: `uv run python -m core.daily_connections_refresh --site-id 2 --skip-crawl`
-   - Why: keeps content current with predictable runtime.
+1. **Nightly: full crawl + refresh with stale-page pruning**
+   - Command: `uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 3 --prune-status-codes 404,410`
+   - Why: discovers new URLs, refreshes changed pages, and prunes removed pages.
 
-2. **Weekly (off-hours): include crawl for new URL discovery**
-   - Command: `uv run python -m core.daily_connections_refresh --site-id 2`
-   - Why: crawl is the expensive stage.
+2. **On demand: quick refresh without crawl**
+   - Command: `uv run python -m core.daily_connections_refresh --site-id 2 --skip-crawl`
+   - Why: faster run when URL discovery is not required.
 
 3. **On demand: debug/sample run**
    - Command: `uv run python -m core.daily_connections_refresh --site-id 2 --skip-crawl --limit-urls 25 --no-cache-refresh`
    - Why: quick health check without full run.
+
+## Missing-Page Pruning
+
+The refresh job can remove pages that are no longer available upstream.
+
+- Enable with `--prune-missing`.
+- Missing responses are tracked by URL using a consecutive streak (`discovered_urls.consecutive_missing`).
+- A page is pruned only after the streak reaches `--prune-missing-after` for configured status codes.
+- Default target codes are `404,410` (override with `--prune-status-codes`).
+- Prune deletes:
+  - `pages`
+  - dependent `extracts`, `chunks`, `embeddings`
+  - the corresponding `discovered_urls` row
+
+This design avoids pruning on transient errors (timeouts, 5xx) and avoids one-off 404 glitches.
+
+## Windows Task Scheduler Script
+
+Use:
+
+- `scripts/run-nightly-connections-refresh.bat` (primary)
+- `scripts/run-nightly-connections-refresh.cmd` (wrapper to `.bat`)
+- Optional shared scheduler target: `C:\Users\harvgs-admin\Documents\Python Scripts\hierag_connections_refresh.bat`
+
+Behavior:
+
+- Runs nightly refresh with `--prune-missing`.
+- Uses nightly defaults: `--site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 3 --prune-status-codes 404,410`.
+- Activates conda env `py313` before running.
+- Writes run logs to `data/logs/connections-refresh_<YYYY-MM-DD>_<HHMM>.log`.
 
 # Operational Checks
 

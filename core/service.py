@@ -58,6 +58,8 @@ def _ensure_optional_columns() -> None:
         db.q("ALTER TABLE messages ADD COLUMN cached_from INTEGER;")
     if "question_norm" not in message_cols:
         db.q("ALTER TABLE messages ADD COLUMN question_norm TEXT;")
+    if "app_version" not in message_cols:
+        db.q("ALTER TABLE messages ADD COLUMN app_version TEXT;")
 
     cache_cols = {row["name"] for row in db.q("PRAGMA table_info(cache_entries);")}
     if "last_used_at" not in cache_cols:
@@ -179,6 +181,7 @@ def insert_message(
     sources_json: str | None = None,
     stream_id: str | None = None,
     question_norm: str | None = None,
+    app_version: str | None = None,
 ) -> int:
     now = _now_iso()
     row = db.t.messages.insert(
@@ -189,6 +192,7 @@ def insert_message(
         created_at=now,
         stream_id=stream_id,
         question_norm=question_norm,
+        app_version=app_version,
     )
     db.t.chats.update({"id": chat_id, "last_message_at": now})
     return int(row["id"])
@@ -340,9 +344,12 @@ if __name__ == "__main__":
             role="user",
             content="hello world",
             question_norm=normalize_question("hello world"),
+            app_version="0.0.0-test",
         )
+        message = get_message(message_id)
         assert chat_belongs_to_user(chat_id, user_id)
-        assert get_message(message_id) is not None
+        assert message is not None
+        assert message.get("app_version") == "0.0.0-test"
         assert hash_question(normalize_question("hello world"))
         upsert_cache_good("hello world", "answer", [{"url": "https://example.com"}])
         assert get_cache_answer("hello world") is not None

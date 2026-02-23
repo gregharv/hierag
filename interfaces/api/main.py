@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -119,6 +120,31 @@ def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
     return hydrated
 
 
+def _latest_site_last_crawled(site_id: int = 2) -> str:
+    try:
+        db = _get_scraper_db()
+        rows = list(
+            db.q(
+                """
+                SELECT last_scraped
+                FROM pages
+                WHERE site_id = ?
+                  AND COALESCE(TRIM(last_scraped), '') <> ''
+                ORDER BY last_scraped DESC
+                LIMIT 1
+                """,
+                [site_id],
+            )
+        )
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+    value = rows[0].get("last_scraped")
+    return str(value).strip() if value else ""
+
+
 def _resolve_uvicorn_app_target() -> str:
     if __package__ == "interfaces.api":
         return "interfaces.api.main:app"
@@ -197,6 +223,20 @@ def _run_startup_url_cleanup(scraper_db) -> None:
             print(f"Startup URL cleanup: retrieval cache refresh skipped: {exc}")
     except Exception as exc:
         print(f"Startup URL cleanup skipped: {exc}")
+
+
+def _run_startup_docs_render() -> None:
+    render_enabled = _env_bool("HIERAG_RENDER_DOCS_ON_STARTUP", True)
+    if not render_enabled:
+        print("Startup docs render: disabled")
+        return
+
+    try:
+        docs_ok = _render_docs_site_quarto()
+        status = "ready" if docs_ok else "skipped_or_failed"
+        print(f"Startup docs render: docs_site={status}")
+    except Exception as exc:
+        print(f"Startup docs render skipped: {exc}")
 
 
 def _clean_ip(value: str) -> str:
@@ -312,6 +352,7 @@ def _render_hybrid_doc_quarto() -> bool:
 
     quarto_bin = shutil.which("quarto")
     if not quarto_bin:
+        print("Hybrid doc render skipped: quarto binary not found on PATH")
         return False
 
     if not HYBRID_RETRIEVAL_DOC.exists():
@@ -328,7 +369,7 @@ def _render_hybrid_doc_quarto() -> bool:
         return True
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 quarto_bin,
                 "render",
@@ -339,11 +380,20 @@ def _render_hybrid_doc_quarto() -> bool:
                 HYBRID_RETRIEVAL_QUARTO_HTML.name,
             ],
             cwd=str(HYBRID_RETRIEVAL_QUARTO.parent),
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError as exc:
+        print(f"Hybrid doc render failed: {exc}")
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            print(f"Hybrid doc render failed: {detail}")
+        else:
+            print("Hybrid doc render failed: unknown Quarto error")
         return False
 
     return HYBRID_RETRIEVAL_QUARTO_HTML.exists()
@@ -355,6 +405,7 @@ def _render_docs_site_quarto() -> bool:
 
     quarto_bin = shutil.which("quarto")
     if not quarto_bin:
+        print("Docs render skipped: quarto binary not found on PATH")
         return False
 
     site_index = DOCS_SITE_DIR / "index.html"
@@ -383,18 +434,62 @@ def _render_docs_site_quarto() -> bool:
     if not needs_render:
         return True
 
-    try:
-        subprocess.run(
-            [quarto_bin, "render"],
-            cwd=str(DOCS_DIR),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return False
+    def _run_render(cwd: Path) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                [quarto_bin, "render"],
+                cwd=str(cwd),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout or "").strip()
+        return True, ""
 
-    return site_index.exists()
+    ok, detail = _run_render(DOCS_DIR)
+    if ok:
+        return site_index.exists()
+
+    if detail:
+        print(f"Docs render failed (in-place): {detail}")
+    else:
+        print("Docs render failed (in-place): unknown Quarto error")
+
+    # Fallback for environments where docs/.quarto is permission-locked.
+    try:
+        with tempfile.TemporaryDirectory(prefix="hierag-docs-render-") as tmp_root:
+            tmp_project_root = Path(tmp_root)
+            tmp_docs = tmp_project_root / "docs"
+            shutil.copytree(
+                DOCS_DIR,
+                tmp_docs,
+                ignore=shutil.ignore_patterns(".quarto", "_site"),
+            )
+            if HYBRID_RETRIEVAL_DOC.exists():
+                shutil.copy2(HYBRID_RETRIEVAL_DOC, tmp_project_root / HYBRID_RETRIEVAL_DOC.name)
+            ok_tmp, detail_tmp = _run_render(tmp_docs)
+            if not ok_tmp:
+                if detail_tmp:
+                    print(f"Docs render failed (temp fallback): {detail_tmp}")
+                else:
+                    print("Docs render failed (temp fallback): unknown Quarto error")
+                return False
+
+            tmp_site = tmp_docs / "_site"
+            if not tmp_site.exists():
+                print("Docs render failed (temp fallback): _site output missing")
+                return False
+
+            if DOCS_SITE_DIR.exists():
+                shutil.rmtree(DOCS_SITE_DIR)
+            shutil.copytree(tmp_site, DOCS_SITE_DIR)
+            return site_index.exists()
+    except Exception as exc:
+        print(f"Docs render failed (temp fallback exception): {exc}")
+        return False
 
 
 def _resolve_docs_site_file(doc_path: str) -> Path | None:
@@ -568,6 +663,7 @@ api = APIRouter(prefix="/api")
 def _startup() -> None:
     global _SCRAPER_DB
     service.create_db_and_tables()
+    _run_startup_docs_render()
     # Avoid write-lock startup failures when scraper.db is shared by another process.
     seed_on_startup = os.getenv("HIERAG_SEED_SCRAPER_ON_STARTUP", "").lower() in {
         "1",
@@ -587,7 +683,9 @@ def profile(request: Request) -> dict[str, object]:
 
 @api.get("/release")
 def release() -> dict[str, str]:
-    return get_release_info()
+    payload = dict(get_release_info())
+    payload["last_crawled"] = _latest_site_last_crawled(site_id=2)
+    return payload
 
 
 @api.get("/profiles")
@@ -653,6 +751,7 @@ def list_messages(chat_id: int, request: Request, limit: int = 20) -> dict[str, 
 
     rows = service.list_recent_messages(chat_id=chat_id, limit=limit)
     messages = []
+    previous_user_created_at: str | None = None
     for row in rows:
         sources = []
         if row.get("sources_json"):
@@ -661,6 +760,13 @@ def list_messages(chat_id: int, request: Request, limit: int = 20) -> dict[str, 
             except Exception:
                 sources = []
         sources = _hydrate_sources_with_last_scraped(sources)
+        created_at = row.get("created_at")
+        question_created_at: str | None = None
+        if row.get("role") == "assistant":
+            question_created_at = previous_user_created_at or created_at
+        elif row.get("role") == "user" and created_at:
+            question_created_at = created_at
+            previous_user_created_at = created_at
         messages.append(
             {
                 "id": row["id"],
@@ -668,7 +774,9 @@ def list_messages(chat_id: int, request: Request, limit: int = 20) -> dict[str, 
                 "content": row["content"],
                 "sources": sources,
                 "has_debug": bool(row.get("debug_json")),
-                "created_at": row.get("created_at"),
+                "created_at": created_at,
+                "question_created_at": question_created_at,
+                "app_version": row.get("app_version"),
             }
         )
     return {"messages": messages}
@@ -684,12 +792,15 @@ def create_message(chat_id: int, payload: MessageCreate, request: Request) -> di
     if not message:
         raise HTTPException(status_code=400, detail="Message is empty")
 
+    release = get_release_info()
+    app_version = str(release.get("version", "")).strip() or None
     question_norm = service.normalize_question(message)
     user_message_id = service.insert_message(
         chat_id=chat_id,
         role="user",
         content=message,
         question_norm=question_norm,
+        app_version=app_version,
     )
     service.maybe_update_chat_title(chat_id, message)
 
@@ -699,12 +810,19 @@ def create_message(chat_id: int, payload: MessageCreate, request: Request) -> di
         role="assistant",
         content="",
         stream_id=stream_id,
+        app_version=app_version,
     )
+    user_row = service.get_message(user_message_id) or {}
+    assistant_row = service.get_message(assistant_message_id) or {}
 
     return {
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_message_id,
         "stream_id": stream_id,
+        "user_created_at": user_row.get("created_at"),
+        "assistant_created_at": assistant_row.get("created_at"),
+        "question_created_at": user_row.get("created_at"),
+        "app_version": assistant_row.get("app_version") or "",
     }
 
 

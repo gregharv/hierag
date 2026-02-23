@@ -52,6 +52,18 @@ def _ensure_extracts_pdf_column(db) -> None:
         db.q("ALTER TABLE extracts ADD COLUMN pdf_id int")
 
 
+def _ensure_discovered_urls_health_columns(db) -> None:
+    cols = {row["name"] for row in db.q("PRAGMA table_info(discovered_urls)")}
+    if "consecutive_missing" not in cols:
+        db.q("ALTER TABLE discovered_urls ADD COLUMN consecutive_missing INTEGER DEFAULT 0")
+    if "last_fetch_status" not in cols:
+        db.q("ALTER TABLE discovered_urls ADD COLUMN last_fetch_status TEXT")
+    if "last_fetch_error" not in cols:
+        db.q("ALTER TABLE discovered_urls ADD COLUMN last_fetch_error TEXT")
+    if "last_failed_at" not in cols:
+        db.q("ALTER TABLE discovered_urls ADD COLUMN last_failed_at TEXT")
+
+
 def ensure_pipeline_schema(db) -> None:
     sites = db.t.sites
     if sites not in db.t:
@@ -74,10 +86,15 @@ def ensure_pipeline_schema(db) -> None:
             url=str,
             kind=str,
             discovered_at=str,
+            consecutive_missing=int,
+            last_fetch_status=str,
+            last_fetch_error=str,
+            last_failed_at=str,
             pk="id",
             foreign_keys=[("site_id", "sites")],
         )
         discovered_urls.create_index(["url"], unique=True)
+    _ensure_discovered_urls_health_columns(db)
 
     pages = db.t.pages
     if pages not in db.t:
@@ -168,4 +185,9 @@ if __name__ == "__main__":
     test_db = bootstrap_scraper_db(":memory:")
     assert test_db.t.sites is not None
     assert len(list(test_db.t.sites())) >= 1
+    discovered_cols = {row["name"] for row in test_db.q("PRAGMA table_info(discovered_urls)")}
+    assert "consecutive_missing" in discovered_cols
+    assert "last_fetch_status" in discovered_cols
+    assert "last_fetch_error" in discovered_cols
+    assert "last_failed_at" in discovered_cols
     print("Check Passed")

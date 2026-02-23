@@ -19,6 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
     monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
     monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "0")
+    monkeypatch.setenv("HIERAG_RENDER_DOCS_ON_STARTUP", "0")
 
     import interfaces.api.main as main
     import core.service as service
@@ -39,6 +40,7 @@ def test_startup_cleanup_executes_and_refreshes_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "1")
     monkeypatch.setenv("HIERAG_URL_CLEANUP_SITE_ID", "2")
     monkeypatch.setenv("HIERAG_URL_CLEANUP_DROP_NON_TARGET", "0")
+    monkeypatch.setenv("HIERAG_RENDER_DOCS_ON_STARTUP", "0")
 
     import interfaces.api.main as main
     import core.service as service
@@ -80,6 +82,7 @@ def test_startup_cleanup_fail_open_when_cleanup_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
     monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
     monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "1")
+    monkeypatch.setenv("HIERAG_RENDER_DOCS_ON_STARTUP", "0")
 
     import interfaces.api.main as main
     import core.service as service
@@ -97,6 +100,35 @@ def test_startup_cleanup_fail_open_when_cleanup_raises(tmp_path, monkeypatch):
         assert response.status_code == 200
 
 
+def test_startup_docs_render_runs_when_enabled(tmp_path, monkeypatch):
+    db_path = tmp_path / "startup_docs_app.db"
+    scraper_db_path = tmp_path / "startup_docs_scraper.db"
+    monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
+    monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
+    monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "0")
+    monkeypatch.setenv("HIERAG_RENDER_DOCS_ON_STARTUP", "1")
+
+    import interfaces.api.main as main
+    import core.service as service
+
+    importlib.reload(service)
+    importlib.reload(main)
+
+    calls = {"docs_render": 0}
+
+    def fake_render_docs():
+        calls["docs_render"] += 1
+        return True
+
+    monkeypatch.setattr(main, "_render_docs_site_quarto", fake_render_docs)
+
+    with TestClient(main.app) as test_client:
+        response = test_client.get("/api/profile")
+        assert response.status_code == 200
+
+    assert calls["docs_render"] == 1
+
+
 def test_profile_endpoint(client: TestClient):
     response = client.get("/api/profile", headers={"x-profile-ip": "10.1.2.3"})
     assert response.status_code == 200
@@ -112,6 +144,8 @@ def test_release_endpoint(client: TestClient):
     assert isinstance(payload.get("version"), str)
     assert payload["version"].strip()
     assert payload.get("changelog_url") == "/connections/reference/changelog"
+    assert "last_crawled" in payload
+    assert isinstance(payload.get("last_crawled"), str)
 
 
 def test_changelog_page_route(client: TestClient):
