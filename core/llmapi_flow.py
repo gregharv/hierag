@@ -4,6 +4,7 @@ import json
 import re
 import time
 from typing import Any, Dict, Generator
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 import httpx
 from openai import OpenAI
@@ -14,6 +15,8 @@ try:
     from .llmapi_retrieval import (
         build_context,
         build_source_links,
+        canonicalize_source_url,
+        extract_tab_step_anchors,
         get_parent_extracts,
         search_embeddings_with_debug,
     )
@@ -24,6 +27,8 @@ except ImportError:
     from core.llmapi_retrieval import (
         build_context,
         build_source_links,
+        canonicalize_source_url,
+        extract_tab_step_anchors,
         get_parent_extracts,
         search_embeddings_with_debug,
     )
@@ -41,6 +46,7 @@ FALLBACK_RETRY_MIN_MAX_EXTRACTS = 10
 FALLBACK_PREFIX_DECISION_CHARS = 48
 FALLBACK_CLARIFY_HISTORY_LIMIT = 8
 FALLBACK_LOOP_GUARD_HISTORY_WINDOW = 8
+PROCEDURE_LINKS_MAX = 3
 _IDK_PREFIX_RE = re.compile(
     r"^\s*(?:"
     r"i(?:\s+[a-z]+){0,3}\s+(?:do\s*not|don[\W_]*t)\s+know"
@@ -59,6 +65,7 @@ _IDK_LEADING_SENTENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _SHORT_CLARIFY_REPLY_PREFIX_RE = re.compile(r"^\s*i\s+said\b", re.IGNORECASE)
+_TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
 
 
 def _fallback_debug_payload() -> dict:
@@ -124,41 +131,149 @@ def _strip_idk_prefix(text: str) -> str:
     return stripped.strip()
 
 
+def _coerce_non_negative_int(value: object, default: int = 0) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except Exception:
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _source_has_tab_step_fragment(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    for key in ("url", "url_canonical"):
+        raw = str(source.get(key) or "").strip()
+        if raw and _TAB_STEP_FRAGMENT_RE.search(raw):
+            return True
+    return False
+
+
+def _source_is_procedure(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    return bool(source.get("has_tab_steps")) or _source_has_tab_step_fragment(source)
+
+
 def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[dict]:
     if not sources:
         return []
 
     hydrated: list[dict] = []
-    cache: dict[str, str | None] = {}
+    cache: dict[str, dict | None] = {}
     for source in sources:
         if not isinstance(source, dict):
             continue
 
         item = dict(source)
-        if item.get("last_scraped"):
-            hydrated.append(item)
-            continue
-
-        url = str(item.get("url") or "").strip()
+        url = str(item.get("url") or item.get("url_canonical") or "").strip()
         if not url:
             hydrated.append(item)
             continue
 
         if url not in cache:
             row = list(db.t.pages.rows_where("url=?", [url], limit=1))
-            cache[url] = row[0].get("last_scraped") if row else None
-        if cache[url]:
-            item["last_scraped"] = cache[url]
+            cache[url] = row[0] if row else None
+
+        page_row = cache[url]
+        has_tab_steps = bool(item.get("has_tab_steps")) or _source_has_tab_step_fragment(item)
+        tab_step_count = _coerce_non_negative_int(item.get("tab_step_count"), default=0)
+
+        if page_row:
+            if not item.get("last_scraped") and page_row.get("last_scraped"):
+                item["last_scraped"] = page_row.get("last_scraped")
+            tab_step_anchors = extract_tab_step_anchors(page_row.get("html") or "")
+            if tab_step_anchors:
+                has_tab_steps = True
+                tab_step_count = max(tab_step_count, len(tab_step_anchors))
+
+        if has_tab_steps and tab_step_count <= 0:
+            tab_step_count = 1
+        item["has_tab_steps"] = bool(has_tab_steps)
+        item["tab_step_count"] = int(tab_step_count)
         hydrated.append(item)
 
     return hydrated
 
 
-def _build_llm_prompt(query: str, context: str) -> tuple[str, str]:
-    system_text = (
-        "Answer the question using only the provided context. "
-        "If the answer is not in the context, say you don't know."
-    )
+def _has_procedure_sources(sources: list[dict] | None) -> bool:
+    for source in sources or []:
+        if isinstance(source, dict) and _source_is_procedure(source):
+            return True
+    return False
+
+
+def _source_label_from_url(source: dict) -> str:
+    raw_url = str(source.get("url") or source.get("url_canonical") or "").strip()
+    if not raw_url:
+        return "procedure"
+    try:
+        parsed = urlsplit(raw_url)
+    except Exception:
+        return "procedure"
+
+    docs_values = parse_qs(parsed.query).get("docs") or []
+    docs_path = ""
+    if docs_values:
+        docs_path = unquote(str(docs_values[0] or "")).strip().strip("/")
+    if docs_path:
+        parts = [part for part in docs_path.split("/") if part]
+        if len(parts) >= 2:
+            return f"{parts[-2]} / {parts[-1]}"
+        return parts[0]
+    path = unquote(parsed.path or "").strip().strip("/")
+    if path:
+        parts = [part for part in path.split("/") if part]
+        return " / ".join(parts[-2:]) if len(parts) >= 2 else parts[0]
+    return (parsed.netloc or "procedure").strip() or "procedure"
+
+
+def _build_procedure_link_markdown(_answer_text: str, sources: list[dict] | None) -> str:
+    if not _has_procedure_sources(sources):
+        return ""
+    seen_urls: set[str] = set()
+    lines: list[str] = []
+    for source in sources or []:
+        if not isinstance(source, dict):
+            continue
+        if not _source_is_procedure(source):
+            continue
+
+        base_url = str(source.get("url") or source.get("url_canonical") or "").strip()
+        if not base_url:
+            continue
+
+        canonical = canonicalize_source_url(str(source.get("url_canonical") or base_url))
+        canonical_key = canonical or base_url
+        if canonical_key in seen_urls:
+            continue
+        seen_urls.add(canonical_key)
+
+        base_no_fragment = urlunsplit(urlsplit(base_url)._replace(fragment=""))
+        link_url = base_no_fragment or base_url
+        label = _source_label_from_url(source)
+        lines.append(f"- [{label}]({link_url})")
+        if len(lines) >= PROCEDURE_LINKS_MAX:
+            break
+
+    if not lines:
+        return ""
+    return "\n\nProcedure links:\n" + "\n".join(lines)
+
+
+def _build_llm_prompt(query: str, context: str, *, procedure_mode: bool = False) -> tuple[str, str]:
+    if procedure_mode:
+        system_text = (
+            "Answer the question using only the provided context. "
+            "Keep it extremely brief: at most one short sentence or one short bullet. "
+            "Do not reproduce long procedures; rely on the Procedure links for step-by-step details. "
+            "If the answer is not in the context, say you don't know."
+        )
+    else:
+        system_text = (
+            "Answer the question using only the provided context. "
+            "If the answer is not in the context, say you don't know."
+        )
     user_text = f"Question: {query}\n\nContext:\n{context}"
     return system_text, user_text
 
@@ -779,7 +894,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 sources = []
         sources = _hydrate_sources_with_last_scraped(db, sources)
         yield {"type": "cache", "cache_id": cached.get("id")}
-        text = cached.get("answer_text", "")
+        text = str(cached.get("answer_text", "") or "")
+        procedure_links_block = _build_procedure_link_markdown(text, sources)
+        if procedure_links_block:
+            text = f"{text}{procedure_links_block}"
         for i in range(0, len(text), 80):
             yield {"type": "delta", "text": text[i : i + 80]}
         yield {
@@ -830,8 +948,12 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
 
     client = OpenAI(http_client=httpx.Client(verify=False))
 
-    def _run_stream_attempt(context_text: str) -> tuple[dict, dict]:
-        system_text_local, user_text_local = _build_llm_prompt(effective_query, context_text)
+    def _run_stream_attempt(context_text: str, *, procedure_mode: bool) -> tuple[dict, dict]:
+        system_text_local, user_text_local = _build_llm_prompt(
+            effective_query,
+            context_text,
+            procedure_mode=procedure_mode,
+        )
         request_payload = {
             "model": LLM_MODEL,
             "system_text": system_text_local,
@@ -871,7 +993,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         fallback_debug["second_pass_retrieval"] = second_pass["retrieval_summary"]
         active_pass = second_pass
         if second_pass["context"]:
-            stream_attempt = _run_stream_attempt(second_pass["context"])
+            stream_attempt = _run_stream_attempt(
+                second_pass["context"],
+                procedure_mode=_has_procedure_sources(second_pass["sources"]),
+            )
             while True:
                 try:
                     event = next(stream_attempt)
@@ -930,7 +1055,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 )
             yield {"type": "delta", "text": llm_response_text}
     else:
-        stream_attempt = _run_stream_attempt(first_pass["context"])
+        stream_attempt = _run_stream_attempt(
+            first_pass["context"],
+            procedure_mode=_has_procedure_sources(first_pass["sources"]),
+        )
         while True:
             try:
                 event = next(stream_attempt)
@@ -956,7 +1084,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
             fallback_debug["second_pass_retrieval"] = second_pass["retrieval_summary"]
             active_pass = second_pass
             if second_pass["context"]:
-                stream_attempt_retry = _run_stream_attempt(second_pass["context"])
+                stream_attempt_retry = _run_stream_attempt(
+                    second_pass["context"],
+                    procedure_mode=_has_procedure_sources(second_pass["sources"]),
+                )
                 while True:
                     try:
                         event = next(stream_attempt_retry)
@@ -1019,6 +1150,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         elif fallback_debug["triggered"]:
             fallback_debug["answer_mode"] = "normal"
 
+    procedure_links_block = _build_procedure_link_markdown(
+        llm_response_text,
+        active_pass["sources"],
+    )
+    if procedure_links_block:
+        llm_response_text = f"{llm_response_text}{procedure_links_block}"
+        yield {"type": "delta", "text": procedure_links_block}
+
     print(f"timing: total {time.perf_counter() - t0:.3f}s")
     yield {
         "type": "debug",
@@ -1073,12 +1212,17 @@ if __name__ == "__main__":
     extract = test_db.t.extracts.insert(page_id=page["id"], extract_index=0, text="extract text")
     chunk = test_db.t.chunks.insert(extract_id=extract["id"], chunk_index=0, text="hello world")
     assert _build_llm_prompt("q", "ctx")[0].startswith("Answer the question")
+    assert "Keep it extremely brief" in _build_llm_prompt("q", "ctx", procedure_mode=True)[0]
     assert _event_get({"type": "x"}, "type") == "x"
     assert _is_idk_like_response("I don't know based on the provided context.")
     assert not _is_idk_like_response("Here is what I found in the context.")
     retry_cfg = _retry_retrieval_config(40, 6)
     assert retry_cfg == {"top_k": 120, "max_extracts": 12}
+    test_db.t.pages.update({"id": page["id"], "html": '<a href="#tab-step1">Step 1</a>'})
     hydrated = _hydrate_sources_with_last_scraped(test_db, [{"url": "https://example.com/doc"}])
     assert hydrated and hydrated[0]["last_scraped"] == "now"
+    assert hydrated[0]["has_tab_steps"] is True
+    links_block = _build_procedure_link_markdown("Use this page.", hydrated)
+    assert "Procedure links:" in links_block
     assert page["id"] and extract["id"] and chunk["id"]
     print("Check Passed")

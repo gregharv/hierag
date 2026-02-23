@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ try:
     from core import service
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
+    from core.llmapi_retrieval import extract_tab_step_anchors
     from core.release_info import get_release_info
 except ImportError:
     project_root = Path(__file__).resolve().parents[2]
@@ -30,6 +32,7 @@ except ImportError:
     from core import service
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
+    from core.llmapi_retrieval import extract_tab_step_anchors
     from core.release_info import get_release_info
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +45,7 @@ HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
 
 _LLMAPI = None
 _SCRAPER_DB = None
+_TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
 
 
 class ChatCreate(BaseModel):
@@ -85,6 +89,24 @@ def _get_scraper_db():
     return _SCRAPER_DB
 
 
+def _coerce_non_negative_int(value: object, default: int = 0) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except Exception:
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _source_has_tab_step_fragment(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    for key in ("url", "url_canonical"):
+        raw = str(source.get(key) or "").strip()
+        if raw and _TAB_STEP_FRAGMENT_RE.search(raw):
+            return True
+    return False
+
+
 def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
     if not sources:
         return []
@@ -95,26 +117,35 @@ def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
         return sources
 
     hydrated: list[dict] = []
-    cache: dict[str, str | None] = {}
+    cache: dict[str, dict | None] = {}
     for source in sources:
         if not isinstance(source, dict):
             continue
 
         item = dict(source)
-        if item.get("last_scraped"):
-            hydrated.append(item)
-            continue
-
-        url = str(item.get("url") or "").strip()
+        url = str(item.get("url") or item.get("url_canonical") or "").strip()
         if not url:
             hydrated.append(item)
             continue
 
         if url not in cache:
             row = list(db.t.pages.rows_where("url=?", [url], limit=1))
-            cache[url] = row[0].get("last_scraped") if row else None
-        if cache[url]:
-            item["last_scraped"] = cache[url]
+            cache[url] = row[0] if row else None
+        page_row = cache[url]
+
+        has_tab_steps = bool(item.get("has_tab_steps")) or _source_has_tab_step_fragment(item)
+        tab_step_count = _coerce_non_negative_int(item.get("tab_step_count"), default=0)
+        if page_row:
+            if not item.get("last_scraped") and page_row.get("last_scraped"):
+                item["last_scraped"] = page_row.get("last_scraped")
+            tab_step_anchors = extract_tab_step_anchors(page_row.get("html") or "")
+            if tab_step_anchors:
+                has_tab_steps = True
+                tab_step_count = max(tab_step_count, len(tab_step_anchors))
+        if has_tab_steps and tab_step_count <= 0:
+            tab_step_count = 1
+        item["has_tab_steps"] = bool(has_tab_steps)
+        item["tab_step_count"] = int(tab_step_count)
         hydrated.append(item)
 
     return hydrated

@@ -37,6 +37,8 @@ except ImportError:
 
 _RETRIEVAL_CACHE = None
 _RETRIEVAL_CACHE_LOCK = threading.Lock()
+_TAB_STEP_HREF_RE = re.compile(r"""href\s*=\s*["'](#tab-step(\d+))["']""", re.IGNORECASE)
+_TAB_STEP_ID_RE = re.compile(r"""id\s*=\s*["'](tab-step(\d+))["']""", re.IGNORECASE)
 
 
 def _expand_query_variants(query: str) -> List[str]:
@@ -106,6 +108,23 @@ def canonicalize_source_url(url: str) -> str:
     if query:
         return f"{scheme}://{netloc}{path}?{query}"
     return f"{scheme}://{netloc}{path}"
+
+
+def extract_tab_step_anchors(html: str) -> list[str]:
+    """Return sorted unique tab-step anchors found in page HTML."""
+    text = str(html or "")
+    if not text:
+        return []
+
+    step_numbers: set[int] = set()
+    for match in _TAB_STEP_HREF_RE.finditer(text):
+        step_numbers.add(int(match.group(2)))
+    for match in _TAB_STEP_ID_RE.finditer(text):
+        step_numbers.add(int(match.group(2)))
+
+    if not step_numbers:
+        return []
+    return [f"#tab-step{num}" for num in sorted(step_numbers)]
 
 
 def _build_retrieval_cache(db):
@@ -411,6 +430,7 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
         url_canonical = canonicalize_source_url(url)
         if url_canonical and url_canonical in seen_urls:
             continue
+        tab_step_anchors = extract_tab_step_anchors(page.get("html") or "")
 
         seen_extract_ids.add(extract_id)
         if url_canonical:
@@ -422,6 +442,8 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
             "url": url,
             "url_canonical": url_canonical,
             "last_scraped": page.get("last_scraped"),
+            "has_tab_steps": bool(tab_step_anchors),
+            "tab_step_count": len(tab_step_anchors),
         }
         if score_details:
             detail = score_details.get(int(chunk_id))
@@ -471,8 +493,12 @@ if __name__ == "__main__":
     encoded_url = "https://connections/?docs=residential%2Fmyway%2Ftopic#tab"
     decoded_url = "https://connections/?docs=residential/myway/topic"
     assert canonicalize_source_url(encoded_url) == canonicalize_source_url(decoded_url)
+    anchors = extract_tab_step_anchors('<a href="#tab-step2"></a><div id="tab-step1"></div>')
+    assert anchors == ["#tab-step1", "#tab-step2"]
     sources = build_source_links(test_db, [(0.9, chunk["id"])], max_sources=1)
     assert len(sources) == 1 and sources[0]["url"] == "https://example.com/doc"
     assert sources[0]["url_canonical"] == "https://example.com/doc"
     assert sources[0]["last_scraped"] == "now"
+    assert sources[0]["has_tab_steps"] is False
+    assert sources[0]["tab_step_count"] == 0
     print("Check Passed")

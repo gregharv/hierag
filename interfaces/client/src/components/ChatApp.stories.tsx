@@ -45,7 +45,7 @@ function createMockFetch(mode = "default") {
   ];
   const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
   const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
-  const storyVersion = "0.1.3";
+  const storyVersion = "0.1.7";
   const chatOneMessages =
     mode === "source-collapse"
       ? [

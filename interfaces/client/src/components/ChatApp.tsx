@@ -15,6 +15,10 @@ const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
+const PROCEDURE_LINKS_MAX = 3;
+const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
+  /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
+const TAB_STEP_FRAGMENT_RE = /#tab-step\d+\b/i;
 
 marked.setOptions({ breaks: true });
 
@@ -189,6 +193,84 @@ function normalizeMessageSources(sources) {
     });
   }
   return output;
+}
+
+function sourceIsProcedure(source) {
+  if (!source || typeof source !== "object") return false;
+  if (Boolean(source?.has_tab_steps)) return true;
+  const url = String(source?.url || "").trim();
+  const canonical = String(source?.url_canonical || "").trim();
+  return TAB_STEP_FRAGMENT_RE.test(url) || TAB_STEP_FRAGMENT_RE.test(canonical);
+}
+
+function stripUrlFragment(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value, window.location.origin);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return value.replace(/#.*$/, "");
+  }
+}
+
+function buildProcedureLinksFromSources(sources) {
+  const normalized = normalizeMessageSources(sources);
+  const candidates = normalized.filter(
+    (source) => sourceIsProcedure(source) && String(source?.link || "").trim()
+  );
+  const links = [];
+  for (const source of candidates) {
+    const href = stripUrlFragment(String(source?.link || "").trim());
+    if (!href) continue;
+    links.push({
+      label: String(source?.label || sourceLabelFromUrl(source) || "source"),
+      href,
+    });
+    if (links.length >= PROCEDURE_LINKS_MAX) break;
+  }
+  return links;
+}
+
+function stripTrailingProcedureLinksMarkdown(content) {
+  const raw = String(content || "");
+  return raw.replace(PROCEDURE_LINKS_TRAILING_BLOCK_RE, "");
+}
+
+function renderMarkdownWithSourceLinkBehavior(content, sources = []) {
+  const rawContent = String(content || "");
+  const hasTrailingProcedureBlock = PROCEDURE_LINKS_TRAILING_BLOCK_RE.test(rawContent);
+  const cleanedContent = stripTrailingProcedureLinksMarkdown(rawContent);
+  const html = String(marked.parse(cleanedContent || ""));
+  if (typeof document === "undefined") {
+    return html;
+  }
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = html;
+
+  const procedureLinks = hasTrailingProcedureBlock ? buildProcedureLinksFromSources(sources) : [];
+  if (procedureLinks.length > 0) {
+    const heading = document.createElement("p");
+    heading.textContent = "Procedure links:";
+    const list = document.createElement("ul");
+    for (const item of procedureLinks) {
+      const li = document.createElement("li");
+      const anchor = document.createElement("a");
+      anchor.setAttribute("href", item.href);
+      anchor.textContent = item.label;
+      li.appendChild(anchor);
+      list.appendChild(li);
+    }
+    wrapper.appendChild(heading);
+    wrapper.appendChild(list);
+  }
+
+  for (const anchor of wrapper.querySelectorAll("a[href]")) {
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noreferrer");
+  }
+  return wrapper.innerHTML;
 }
 
 function parseTimestamp(value) {
@@ -1178,7 +1260,10 @@ export function ChatApp() {
                             <div
                               className="markdown"
                               dangerouslySetInnerHTML={{
-                                __html: marked.parse(msg.content || ""),
+                                __html: renderMarkdownWithSourceLinkBehavior(
+                                  msg.content || "",
+                                  msg.sources || []
+                                ),
                               }}
                             />
                             {hasSources && (

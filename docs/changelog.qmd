@@ -12,6 +12,13 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.7
+
+- **Date (UTC):** 2026-02-23
+- **Changed:** Added procedure-link-first answer behavior that detects step-based sources via `#tab-step{n}` markers, appends consistent `Procedure links` blocks, and keeps links at source-page level (no deep-link fragment navigation). Also tightened procedure-mode prompt brevity and backfilled procedure source metadata for historical messages in API hydration.
+- **Why it matters:** Procedural responses stay concise and reliably route users to canonical source pages for full steps, while preserving consistent link behavior across fresh and historical chat turns.
+- **Affected areas:** `core/llmapi_flow.py`, `core/llmapi_retrieval.py`, `interfaces/api/main.py`, `interfaces/client/src/components/ChatApp.tsx`, `core/tests/test_llmapi_flow.py`, `core/tests/test_llmapi_retrieval.py`
+
 ## v0.1.6
 
 - **Date (UTC):** 2026-02-23

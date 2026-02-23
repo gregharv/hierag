@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from core.fastlite_db import ensure_pipeline_schema, get_scraper_db
-from core.llmapi_retrieval import build_source_links, canonicalize_source_url, get_parent_extracts
+from core.llmapi_retrieval import (
+    build_source_links,
+    canonicalize_source_url,
+    extract_tab_step_anchors,
+    get_parent_extracts,
+)
 
 
 def _seed_db_with_duplicate_urls():
@@ -19,7 +24,7 @@ def _seed_db_with_duplicate_urls():
     page_encoded = db.t.pages.insert(
         site_id=1,
         url="https://connections/?docs=residential%2Fmyway%2Ftopic#tab-a",
-        html="<div>encoded</div>",
+        html='<ul><li id="tab-step1"><a href="#tab-step2">next</a></li></ul>',
         content_hash="h1",
         last_scraped="now",
         last_changed="now",
@@ -100,6 +105,21 @@ def test_build_source_links_dedupes_by_canonical_url_and_sets_url_canonical():
     assert len(sources) == 2
     assert sources[0]["url_canonical"] == "https://connections/?docs=residential/myway/topic"
     assert sources[1]["url_canonical"] == "https://connections/?docs=residential/traditional/topic"
+    assert sources[0]["has_tab_steps"] is True
+    assert sources[0]["tab_step_count"] == 2
+    assert sources[1]["has_tab_steps"] is False
+    assert sources[1]["tab_step_count"] == 0
+
+
+def test_extract_tab_step_anchors_sorts_and_dedupes():
+    html = """
+    <div id="tab-step2"></div>
+    <a href="#tab-step10">Step 10</a>
+    <a href="#tab-step2">Step 2</a>
+    <a href="#tab-step1">Step 1</a>
+    """
+    anchors = extract_tab_step_anchors(html)
+    assert anchors == ["#tab-step1", "#tab-step2", "#tab-step10"]
 
 
 # %%
