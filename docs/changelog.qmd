@@ -11,6 +11,20 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.5
+
+- **Date (UTC):** 2026-02-18
+- **Changed:** Added a clarification loop guard that suppresses repeated fallback clarifying questions after short user replies, excluded prior fallback-clarify assistant turns from rewrite/clarifier history, and added fallback loop diagnostics in debug payloads.
+- **Why it matters:** Prevents repetitive clarification loops (for example after users answer with short confirmations like "traditional") and forces a best-effort actionable answer instead of asking the same question again.
+- **Affected areas:** `core/llmapi_flow.py`, `interfaces/api/main.py`, `core/tests/test_llmapi_flow.py`, `interfaces/api/tests/test_api.py`
+
+## v0.1.4
+
+- **Date (UTC):** 2026-02-18
+- **Changed:** Added clarify-or-retrieve fallback behavior when responses are likely to start with "I don't know," including a second local retrieval pass, one-question clarification fallback, and per-turn fallback diagnostics in debug payloads.
+- **Why it matters:** Reduces dead-end answers by either finding better local context or asking a targeted follow-up question without changing the stream protocol.
+- **Affected areas:** `core/llmapi_flow.py`, `core/tests/test_llmapi_flow.py`, `interfaces/api/tests/test_api.py`
+
 ## v0.1.3
 
 - **Date (UTC):** 2026-02-18

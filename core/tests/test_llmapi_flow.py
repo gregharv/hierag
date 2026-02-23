@@ -107,6 +107,42 @@ class _FakeOpenAI:
         self.responses = _FakeResponses()
 
 
+class _SequencedFakeResponses:
+    def __init__(self, stream_texts: list[str] | None = None):
+        self._stream_texts = list(stream_texts or [])
+
+    def create(self, *args, **kwargs):
+        if kwargs.get("stream"):
+            text = self._stream_texts.pop(0) if self._stream_texts else ""
+            return [{"type": "response.output_text.delta", "delta": text}]
+        return SimpleNamespace(output_text="stub-answer")
+
+
+class _SequencedFakeOpenAI:
+    stream_texts: list[str] = []
+
+    def __init__(self, *args, **kwargs):
+        self.responses = _SequencedFakeResponses(type(self).stream_texts)
+
+
+class _CaptureResponses:
+    last_user_text: str = ""
+
+    def create(self, *args, **kwargs):
+        if kwargs.get("stream"):
+            return [{"type": "response.output_text.delta", "delta": "stub-answer"}]
+        inputs = kwargs.get("input") or []
+        if len(inputs) >= 2:
+            user_content = (inputs[1].get("content") or [{}])[0]
+            _CaptureResponses.last_user_text = str(user_content.get("text") or "")
+        return SimpleNamespace(output_text="rewritten-question")
+
+
+class _CaptureOpenAI:
+    def __init__(self, *args, **kwargs):
+        self.responses = _CaptureResponses()
+
+
 def test_stream_dual_merge_prefers_original_signal_and_disables_glossary(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     chunk_ids = sorted(chunk_meta.keys())
@@ -178,6 +214,260 @@ def test_stream_includes_glossary_for_myway_queries(monkeypatch):
     assert debug["glossary"]["included"] is True
     assert "myway" in debug["glossary"]["trigger_terms"]
     assert "Glossary: 'Prepay' and 'MyWay'" in debug["llm_request"]["user_text"]
+
+
+def test_stream_idk_prefix_retries_retrieval_and_answers(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    chunk_ids = sorted(chunk_meta.keys())
+    chunk_first, chunk_retry = chunk_ids[0], chunk_ids[1]
+    search_calls = []
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        search_calls.append((query, int(top_k)))
+        if len(search_calls) == 1:
+            scored = [(0.81, chunk_first)]
+        else:
+            scored = [(0.96, chunk_retry)]
+        return scored, _make_debug_payload(query, scored, chunk_meta)
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    _SequencedFakeOpenAI.stream_texts = [
+        "I don't know based on the provided context.",
+        "Use the retry source details to complete the workflow.",
+    ]
+    monkeypatch.setattr(flow, "OpenAI", _SequencedFakeOpenAI)
+
+    events = list(flow.stream_answer_with_context(db, "Need workflow steps", top_k=10, max_extracts=2))
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+
+    assert final_text == "Use the retry source details to complete the workflow."
+    assert len(search_calls) == 2
+    assert search_calls[0][1] >= 40
+    assert search_calls[1][1] >= 120
+    assert debug["fallback"]["triggered"] is True
+    assert debug["fallback"]["reason"] == "idk_prefix"
+    assert debug["fallback"]["final_mode"] == "answer"
+    assert debug["fallback"]["retry_config"] == {"top_k": 120, "max_extracts": 10}
+    assert debug["fallback"]["first_pass_retrieval"] is not None
+    assert debug["fallback"]["second_pass_retrieval"] is not None
+    assert debug["sources"][0]["chunk_id"] == chunk_retry
+
+
+def test_stream_idk_prefix_retries_then_clarifies(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    chunk_id = sorted(chunk_meta.keys())[0]
+    search_calls = []
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        search_calls.append((query, int(top_k)))
+        scored = [(0.82, chunk_id)]
+        return scored, _make_debug_payload(query, scored, chunk_meta)
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: "Can you clarify which program and customer type you mean?",
+    )
+    _SequencedFakeOpenAI.stream_texts = [
+        "I don't know from the provided context.",
+        "I still don't know from the context.",
+    ]
+    monkeypatch.setattr(flow, "OpenAI", _SequencedFakeOpenAI)
+
+    events = list(flow.stream_answer_with_context(db, "Need workflow steps", top_k=10, max_extracts=2))
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+
+    assert len(search_calls) == 2
+    assert search_calls[1][1] >= 120
+    assert final_text == "Can you clarify which program and customer type you mean?"
+    assert "don't know" not in final_text.lower()
+    assert debug["fallback"]["triggered"] is True
+    assert debug["fallback"]["reason"] == "retry_still_insufficient"
+    assert debug["fallback"]["final_mode"] == "clarify"
+    assert debug["llm_request"] is None
+
+
+def test_stream_no_context_retries_then_clarifies(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    search_calls = []
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        search_calls.append((query, int(top_k)))
+        scored: list[tuple[float, int]] = []
+        return scored, _make_debug_payload(query, scored, chunk_meta)
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: "Can you clarify which exact policy and customer scenario you need?",
+    )
+
+    events = list(flow.stream_answer_with_context(db, "Need workflow steps", top_k=10, max_extracts=2))
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+
+    assert len(search_calls) == 2
+    assert search_calls[0][1] >= 40
+    assert search_calls[1][1] >= 120
+    assert final_text == "Can you clarify which exact policy and customer scenario you need?"
+    assert debug["fallback"]["triggered"] is True
+    assert debug["fallback"]["reason"] == "retry_still_insufficient"
+    assert debug["fallback"]["final_mode"] == "clarify"
+    assert debug["fallback"]["retry_config"] == {"top_k": 120, "max_extracts": 10}
+    assert debug["fallback"]["first_pass_retrieval"]["ranked_chunks"] == []
+    assert debug["fallback"]["second_pass_retrieval"]["ranked_chunks"] == []
+
+
+def test_rewrite_excludes_prior_fallback_clarify_turns(monkeypatch):
+    monkeypatch.setattr(flow, "OpenAI", _CaptureOpenAI)
+    history = [
+        {"role": "user", "content": "Customer is off for nonpayment."},
+        {
+            "role": "assistant",
+            "content": "What is the specific customer program or plan?",
+            "fallback_final_mode": "clarify",
+        },
+        {"role": "user", "content": "traditional"},
+    ]
+    rewritten, debug = flow.rewrite_query_with_history("traditional", history=history)
+
+    assert debug["used"] is True
+    assert rewritten == "rewritten-question"
+    assert "specific customer program or plan" not in _CaptureResponses.last_user_text
+    assert "Customer is off for nonpayment." in _CaptureResponses.last_user_text
+    assert "traditional" in _CaptureResponses.last_user_text
+
+
+def test_loop_guard_prevents_second_clarify_after_short_user_reply(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    chunk_id = sorted(chunk_meta.keys())[0]
+    search_calls = []
+    history = [
+        {"role": "user", "content": "An active tradition customer is off for nonpayment."},
+        {
+            "role": "assistant",
+            "content": "What is the specific customer program or plan?",
+            "fallback_final_mode": "clarify",
+            "message_id": 123,
+        },
+    ]
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        search_calls.append((query, int(top_k)))
+        scored = [(0.84, chunk_id)]
+        return scored, _make_debug_payload(query, scored, chunk_meta)
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: (_ for _ in ()).throw(AssertionError("clarifying question should be suppressed by loop guard")),
+    )
+    _SequencedFakeOpenAI.stream_texts = [
+        "I don't know based on the provided context.",
+        "I still don't know from the context.",
+    ]
+    monkeypatch.setattr(flow, "OpenAI", _SequencedFakeOpenAI)
+
+    events = list(
+        flow.stream_answer_with_context(
+            db,
+            "traditional",
+            top_k=10,
+            max_extracts=2,
+            history=history,
+        )
+    )
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+
+    assert len(search_calls) == 2
+    assert final_text == "from the context."
+    assert debug["fallback"]["final_mode"] == "answer"
+    assert debug["fallback"]["loop_guard_applied"] is True
+    assert debug["fallback"]["clarify_turns_recent"] >= 1
+    assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
+
+
+def test_loop_guard_uses_best_effort_when_second_pass_idk_has_no_salvage(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    chunk_id = sorted(chunk_meta.keys())[0]
+    history = [
+        {"role": "user", "content": "An active tradition customer is off for nonpayment."},
+        {
+            "role": "assistant",
+            "content": "What is the specific customer program or plan?",
+            "fallback_final_mode": "clarify",
+            "message_id": 123,
+        },
+    ]
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        scored = [(0.84, chunk_id)]
+        return scored, _make_debug_payload(query, scored, chunk_meta)
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: (_ for _ in ()).throw(AssertionError("clarifying question should be suppressed by loop guard")),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_build_best_effort_answer",
+        lambda query, context, history=None: "Best effort answer from loop guard.",
+    )
+    _SequencedFakeOpenAI.stream_texts = [
+        "I don't know.",
+        "I don't know.",
+    ]
+    monkeypatch.setattr(flow, "OpenAI", _SequencedFakeOpenAI)
+
+    events = list(
+        flow.stream_answer_with_context(
+            db,
+            "i said traditional",
+            top_k=10,
+            max_extracts=2,
+            history=history,
+        )
+    )
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+
+    assert final_text == "Best effort answer from loop guard."
+    assert debug["fallback"]["final_mode"] == "answer"
+    assert debug["fallback"]["loop_guard_applied"] is True
+    assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
 
 
 # %%

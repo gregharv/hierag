@@ -258,7 +258,7 @@ def _user_id(request: Request) -> int:
     return service.get_or_create_user_by_ip(_client_ip(request))
 
 
-def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int = 50) -> list[dict[str, str]]:
+def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int = 50) -> list[dict[str, object]]:
     rows = service.list_recent_messages(chat_id=chat_id, limit=limit)
     if not rows:
         return []
@@ -271,7 +271,7 @@ def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int =
         if current_user:
             current_user_message_id = current_user.get("id")
 
-    history: list[dict[str, str]] = []
+    history: list[dict[str, object]] = []
     for row in rows:
         if row.get("id") == assistant_message_id:
             continue
@@ -288,7 +288,20 @@ def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int =
         content = (row.get("content") or "").strip()
         if not content:
             continue
-        history.append({"role": role, "content": content})
+        item: dict[str, object] = {
+            "role": role,
+            "content": content,
+            "message_id": row.get("id"),
+        }
+        if role == "assistant" and row.get("debug_json"):
+            try:
+                debug_payload = json.loads(row["debug_json"])
+            except Exception:
+                debug_payload = {}
+            fallback_payload = debug_payload.get("fallback") if isinstance(debug_payload, dict) else None
+            if isinstance(fallback_payload, dict):
+                item["fallback_final_mode"] = fallback_payload.get("final_mode")
+        history.append(item)
 
     return history
 

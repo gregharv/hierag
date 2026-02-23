@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Dict, Generator
+from typing import Any, Dict, Generator
 
 import httpx
 from openai import OpenAI
@@ -36,6 +36,92 @@ RETRIEVAL_ORIGINAL_WEIGHT = 0.65
 RETRIEVAL_REWRITTEN_WEIGHT = 0.35
 RETRIEVAL_EXPANDED_MIN_TOP_K = 40
 RETRIEVAL_EXPANDED_MULTIPLIER = 4
+FALLBACK_RETRY_MIN_TOP_K = 120
+FALLBACK_RETRY_MIN_MAX_EXTRACTS = 10
+FALLBACK_PREFIX_DECISION_CHARS = 48
+FALLBACK_CLARIFY_HISTORY_LIMIT = 8
+FALLBACK_LOOP_GUARD_HISTORY_WINDOW = 8
+_IDK_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"i(?:\s+[a-z]+){0,3}\s+(?:do\s*not|don[\W_]*t)\s+know"
+    r"|i\s+(?:can\s*not|cannot|could\s+not)\s+(?:find|answer)"
+    r"|the\s+provided\s+context\s+(?:does\s+not|doesn[\W_]*t)\s+(?:describe|include|contain)"
+    r"|based\s+on\s+the\s+provided\s+context,\s*i\s+(?:do\s*not|don[\W_]*t)\s+know"
+    r")\b",
+    re.IGNORECASE,
+)
+_IDK_LEADING_SENTENCE_RE = re.compile(
+    r"^\s*(?:"
+    r"i(?:\s+[a-z]+){0,3}\s+(?:do\s*not|don[\W_]*t)\s+know"
+    r"|based\s+on\s+the\s+provided\s+context(?:,\s*)?(?:i(?:\s+[a-z]+){0,3}\s+)?(?:do\s*not|don[\W_]*t)\s+know"
+    r"|the\s+provided\s+context\s+(?:does\s+not|doesn[\W_]*t)\s+(?:describe|include|contain)"
+    r")\s*[:\-\u2014,]*\s*",
+    re.IGNORECASE,
+)
+_SHORT_CLARIFY_REPLY_PREFIX_RE = re.compile(r"^\s*i\s+said\b", re.IGNORECASE)
+
+
+def _fallback_debug_payload() -> dict:
+    return {
+        "triggered": False,
+        "reason": None,
+        "final_mode": "answer",
+        "first_pass_retrieval": None,
+        "second_pass_retrieval": None,
+        "retry_config": None,
+        "loop_guard_applied": False,
+        "clarify_turns_recent": 0,
+        "answer_mode": None,
+    }
+
+
+def _retry_retrieval_config(retrieval_top_k: int, max_extracts: int) -> dict[str, int]:
+    return {
+        "top_k": max(int(retrieval_top_k or 0) * 2, FALLBACK_RETRY_MIN_TOP_K),
+        "max_extracts": max(int(max_extracts or 0) * 2, FALLBACK_RETRY_MIN_MAX_EXTRACTS),
+    }
+
+
+def _is_idk_like_response(text: str) -> bool:
+    cleaned = " ".join(str(text or "").strip().split())
+    if not cleaned:
+        return False
+    return bool(_IDK_PREFIX_RE.match(cleaned))
+
+
+def _deterministic_clarifying_question(original_query: str) -> str:
+    cleaned = " ".join(str(original_query or "").split()).replace('"', "'")
+    if cleaned:
+        if len(cleaned) > 120:
+            cleaned = cleaned[:120].rstrip()
+        return (
+            f'Could you clarify which specific policy or workflow you mean for "{cleaned}", '
+            "including customer type, program, and current service status?"
+        )
+    return (
+        "Could you clarify which specific policy or workflow you need, including customer type, "
+        "program, and current service status?"
+    )
+
+
+def _latest_user_reply_is_short_clarification(original_query: str) -> bool:
+    value = " ".join(str(original_query or "").strip().split())
+    if not value:
+        return False
+    if _SHORT_CLARIFY_REPLY_PREFIX_RE.match(value):
+        return True
+    return len(value.split()) <= 4
+
+
+def _strip_idk_prefix(text: str) -> str:
+    value = " ".join(str(text or "").strip().split())
+    if not value:
+        return ""
+    stripped = _IDK_LEADING_SENTENCE_RE.sub("", value, count=1).strip()
+    if not stripped:
+        return ""
+    stripped = stripped.lstrip(" .,:;-\u2014")
+    return stripped.strip()
 
 
 def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[dict]:
@@ -296,11 +382,50 @@ def _run_retrieval_strategy(
     )
 
 
-def _clean_history(history: list[dict] | None, limit: int = QUERY_REWRITE_HISTORY_LIMIT) -> list[dict]:
+def _run_retrieval_pass(
+    db,
+    *,
+    original_query: str,
+    effective_query: str,
+    retrieval_top_k: int,
+    max_extracts: int,
+    glossary_included: bool,
+) -> dict:
+    scored, retrieval_debug = _run_retrieval_strategy(
+        db,
+        original_query=original_query,
+        effective_query=effective_query,
+        retrieval_top_k=retrieval_top_k,
+    )
+    extracts = get_parent_extracts(db, scored, max_extracts=max_extracts)
+    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS if glossary_included else None)
+    score_details = retrieval_debug.get("by_chunk_id", {}) if isinstance(retrieval_debug, dict) else {}
+    sources = build_source_links(
+        db,
+        scored,
+        max_sources=max_extracts,
+        score_details=score_details,
+    )
+    sources = _hydrate_sources_with_last_scraped(db, sources)
+    return {
+        "scored": scored,
+        "retrieval_debug": retrieval_debug,
+        "retrieval_summary": _summarize_retrieval_debug(retrieval_debug),
+        "context": context,
+        "sources": sources,
+    }
+
+
+def _clean_history(
+    history: list[dict] | None,
+    limit: int = QUERY_REWRITE_HISTORY_LIMIT,
+    *,
+    exclude_fallback_clarify_assistant: bool = False,
+) -> list[dict]:
     if not history:
         return []
 
-    cleaned: list[dict] = []
+    cleaned: list[dict[str, Any]] = []
     for item in history:
         if not isinstance(item, dict):
             continue
@@ -310,11 +435,152 @@ def _clean_history(history: list[dict] | None, limit: int = QUERY_REWRITE_HISTOR
         content = str(item.get("content", "")).strip()
         if not content:
             continue
-        cleaned.append({"role": role, "content": content})
+        fallback_final_mode = str(item.get("fallback_final_mode") or "").strip().lower()
+        if exclude_fallback_clarify_assistant and role == "assistant" and fallback_final_mode == "clarify":
+            continue
+        cleaned_item: dict[str, Any] = {"role": role, "content": content}
+        if "fallback_final_mode" in item:
+            cleaned_item["fallback_final_mode"] = item.get("fallback_final_mode")
+        if "message_id" in item:
+            cleaned_item["message_id"] = item.get("message_id")
+        cleaned.append(cleaned_item)
 
     if limit <= 0:
         return cleaned
     return cleaned[-limit:]
+
+
+def _recent_clarify_turns(history: list[dict] | None, window: int = FALLBACK_LOOP_GUARD_HISTORY_WINDOW) -> int:
+    cleaned = _clean_history(history, limit=max(int(window), 1))
+    clarify_count = 0
+    for item in cleaned:
+        if str(item.get("role", "")).lower() != "assistant":
+            continue
+        if str(item.get("fallback_final_mode") or "").strip().lower() == "clarify":
+            clarify_count += 1
+    return clarify_count
+
+
+def _build_best_effort_answer(query: str, context: str, history: list[dict] | None = None) -> str:
+    fallback = (
+        "Based on the available context, use the standard nonpayment workflow: verify account security, "
+        "confirm disconnection status, share balance and payment options, and apply the correct program-specific "
+        "reconnection steps for the active account."
+    )
+    context_text = str(context or "").strip()
+    if not context_text:
+        return fallback
+
+    cleaned_history = _clean_history(
+        history,
+        limit=FALLBACK_CLARIFY_HISTORY_LIMIT,
+        exclude_fallback_clarify_assistant=True,
+    )
+    history_lines = [f"{idx}. {turn['role']}: {turn['content']}" for idx, turn in enumerate(cleaned_history, start=1)]
+    system_text = (
+        "You are a customer-support assistant. Answer using only the provided context. "
+        "Do not ask follow-up questions. Do not begin with 'I don't know'. "
+        "If context is incomplete, state brief assumptions and provide the most actionable steps."
+    )
+    user_lines = [f"Question: {query}", "Context:", context_text]
+    if history_lines:
+        user_lines.extend(["Recent history:"] + history_lines)
+    user_text = "\n".join(user_lines)
+
+    client = OpenAI(http_client=httpx.Client(verify=False))
+    try:
+        response = client.responses.create(
+            model=LLM_MODEL,
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"},
+            input=[
+                {"role": "system", "content": [{"type": "input_text", "text": system_text}]},
+                {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+            ],
+        )
+    except Exception:
+        return fallback
+
+    answer = " ".join(str(response.output_text or "").split()).strip()
+    if not answer:
+        return fallback
+    sanitized = _strip_idk_prefix(answer)
+    if sanitized:
+        answer = sanitized
+    if answer.endswith("?"):
+        return fallback
+    return answer
+
+
+def _build_clarifying_question(
+    original_query: str,
+    effective_query: str,
+    history: list[dict] | None = None,
+    sources: list[dict] | None = None,
+) -> str:
+    fallback = _deterministic_clarifying_question(original_query)
+    cleaned_history = _clean_history(
+        history,
+        limit=FALLBACK_CLARIFY_HISTORY_LIMIT,
+        exclude_fallback_clarify_assistant=True,
+    )
+    history_lines = [f"{idx}. {turn['role']}: {turn['content']}" for idx, turn in enumerate(cleaned_history, start=1)]
+
+    source_urls = []
+    for item in sources or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("url_canonical") or "").strip()
+        if url:
+            source_urls.append(url)
+        if len(source_urls) >= 3:
+            break
+
+    system_text = (
+        "You generate one concise clarifying question to disambiguate a retrieval request. "
+        "Return exactly one question and do not answer it."
+    )
+    user_lines = [
+        f"Original question: {original_query}",
+        f"Effective retrieval question: {effective_query}",
+    ]
+    if history_lines:
+        user_lines.append("Recent history:")
+        user_lines.extend(history_lines)
+    if source_urls:
+        user_lines.append("Top retrieved sources:")
+        user_lines.extend(f"- {url}" for url in source_urls)
+    user_lines.append(
+        "Ask one short follow-up question that will most improve retrieval specificity "
+        "(scope, customer type, program, or workflow step)."
+    )
+    user_text = "\n".join(user_lines)
+
+    client = OpenAI(http_client=httpx.Client(verify=False))
+    try:
+        response = client.responses.create(
+            model=QUERY_REWRITE_MODEL,
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"},
+            input=[
+                {"role": "system", "content": [{"type": "input_text", "text": system_text}]},
+                {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+            ],
+        )
+    except Exception:
+        return fallback
+
+    candidate = " ".join(str(response.output_text or "").split())
+    if not candidate:
+        return fallback
+    question = candidate.splitlines()[0].strip()
+    if "?" in question:
+        question = question[: question.find("?") + 1]
+    else:
+        question = question.rstrip(" .!") + "?"
+    if len(question) > 220:
+        question = question[:220].rstrip(" ,;:.!?") + "?"
+    return question or fallback
 
 
 def rewrite_query_with_history(query: str, history: list[dict] | None = None) -> tuple[str, dict]:
@@ -322,7 +588,10 @@ def rewrite_query_with_history(query: str, history: list[dict] | None = None) ->
     if not original:
         return original, {"used": False, "reason": "empty_query"}
 
-    cleaned_history = _clean_history(history)
+    cleaned_history = _clean_history(
+        history,
+        exclude_fallback_clarify_assistant=True,
+    )
     if not cleaned_history:
         return original, {"used": False, "reason": "no_history"}
 
@@ -380,28 +649,43 @@ def rewrite_query_with_history(query: str, history: list[dict] | None = None) ->
 
 
 def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None):
-    """Search, gather context, and ask the LLM to answer."""
-    t0 = time.perf_counter()
-    original_query = str(query or "").strip()
-    effective_query, _ = rewrite_query_with_history(original_query, history=history)
-    retrieval_top_k = _expanded_retrieval_top_k(top_k=top_k, max_extracts=max_extracts)
-    scored, retrieval_debug = _run_retrieval_strategy(
+    """Compatibility wrapper that collects text and sources from the streaming path."""
+    text_parts: list[str] = []
+    sources: list[dict] = []
+    for event in stream_answer_with_context(
         db,
-        original_query=original_query,
-        effective_query=effective_query,
-        retrieval_top_k=retrieval_top_k,
-    )
-    extracts = get_parent_extracts(db, scored, max_extracts=max_extracts)
-    glossary = _glossary_debug(original_query=original_query, effective_query=effective_query)
-    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS if glossary["included"] else None)
-    if not context:
-        print("No context available to send to the LLM.")
-        return None
+        query,
+        top_k=top_k,
+        max_extracts=max_extracts,
+        history=history,
+    ):
+        etype = event.get("type")
+        if etype == "delta":
+            text_parts.append(str(event.get("text", "")))
+        elif etype == "sources":
+            sources = list(event.get("sources", []))
+        elif etype == "error":
+            print(str(event.get("error", "Unknown error")))
 
-    client = OpenAI(http_client=httpx.Client(verify=False))
-    t_llm = time.perf_counter()
-    system_text, user_text = _build_llm_prompt(effective_query, context)
-    response = client.responses.create(
+    text = "".join(text_parts).strip()
+    if not text:
+        return None
+    print(text)
+    if sources:
+        print("\nSources:")
+        for source in sources:
+            print(f"- {source.get('url')}")
+    return text, sources
+
+
+def _event_get(event, key, default=None):
+    if isinstance(event, dict):
+        return event.get(key, default)
+    return getattr(event, key, default)
+
+
+def _stream_llm_with_prefix_guard(client: OpenAI, system_text: str, user_text: str) -> Generator[Dict, None, dict]:
+    stream = client.responses.create(
         model=LLM_MODEL,
         reasoning={"effort": "none"},
         text={"verbosity": "low"},
@@ -409,29 +693,58 @@ def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None)
             {"role": "system", "content": [{"type": "input_text", "text": system_text}]},
             {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
         ],
+        stream=True,
     )
 
-    print(f"timing: llm_response {time.perf_counter() - t_llm:.3f}s")
-    print(f"timing: total {time.perf_counter() - t0:.3f}s")
-    print(response.output_text)
-    score_details = retrieval_debug.get("by_chunk_id", {})
-    sources = build_source_links(
-        db,
-        scored,
-        max_sources=max_extracts,
-        score_details=score_details,
-    )
-    if sources:
-        print("\nSources:")
-        for source in sources:
-            print(f"- {source['url']}")
-    return response.output_text, sources
+    response_parts: list[str] = []
+    buffered: list[str] = []
+    buffered_text = ""
+    decided = False
+    idk_prefix = False
 
+    try:
+        for event in stream:
+            if _event_get(event, "type") != "response.output_text.delta":
+                continue
+            delta = _event_get(event, "delta")
+            if not delta:
+                continue
 
-def _event_get(event, key, default=None):
-    if isinstance(event, dict):
-        return event.get(key, default)
-    return getattr(event, key, default)
+            response_parts.append(delta)
+            if decided:
+                yield {"type": "delta", "text": delta}
+                continue
+
+            buffered.append(delta)
+            buffered_text += delta
+            prefix = buffered_text.lstrip()
+            if prefix and _is_idk_like_response(prefix):
+                idk_prefix = True
+                decided = True
+                break
+            if len(prefix) >= FALLBACK_PREFIX_DECISION_CHARS:
+                decided = True
+                for part in buffered:
+                    yield {"type": "delta", "text": part}
+                buffered = []
+
+        if not decided and not idk_prefix:
+            prefix = buffered_text.lstrip()
+            if prefix and _is_idk_like_response(prefix):
+                idk_prefix = True
+            else:
+                for part in buffered:
+                    yield {"type": "delta", "text": part}
+                buffered = []
+    finally:
+        closer = getattr(stream, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+
+    return {"text": "".join(response_parts), "idk_prefix": idk_prefix}
 
 
 def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None) -> Generator[Dict, None, None]:
@@ -441,6 +754,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
     effective_query, rewrite_debug = rewrite_query_with_history(original_query, history=history)
     retrieval_top_k = _expanded_retrieval_top_k(top_k=top_k, max_extracts=max_extracts)
     glossary = _glossary_debug(original_query=original_query, effective_query=effective_query)
+    fallback_debug = _fallback_debug_payload()
+    clarify_turns_recent = _recent_clarify_turns(history, window=FALLBACK_LOOP_GUARD_HISTORY_WINDOW)
+    fallback_debug["clarify_turns_recent"] = clarify_turns_recent
+    loop_guard_candidate = clarify_turns_recent >= 1 and _latest_user_reply_is_short_clarification(original_query)
 
     cache_lookup_order = [original_query]
     cache_hit_query = None
@@ -489,89 +806,219 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 "sources": sources,
                 "llm_request": None,
                 "llm_response_text": text,
+                "fallback": fallback_debug,
             },
         }
         yield {"type": "sources", "sources": sources}
         yield {"type": "done"}
         return
 
-    scored, retrieval_debug = _run_retrieval_strategy(
+    first_pass = _run_retrieval_pass(
         db,
         original_query=original_query,
         effective_query=effective_query,
         retrieval_top_k=retrieval_top_k,
+        max_extracts=max_extracts,
+        glossary_included=bool(glossary["included"]),
     )
-    extracts = get_parent_extracts(db, scored, max_extracts=max_extracts)
-    context = build_context(extracts, glossary=GLOSSARY_SNIPPETS if glossary["included"] else None)
-    score_details = retrieval_debug.get("by_chunk_id", {})
-    sources = build_source_links(
-        db,
-        scored,
-        max_sources=max_extracts,
-        score_details=score_details,
-    )
-    sources = _hydrate_sources_with_last_scraped(db, sources)
-    retrieval_debug_summary = _summarize_retrieval_debug(retrieval_debug)
+    fallback_debug["first_pass_retrieval"] = first_pass["retrieval_summary"]
 
-    if not context:
-        yield {
-            "type": "delta",
-            "text": "I couldn't find relevant context in the embeddings database.",
-        }
-        yield {
-            "type": "debug",
-            "debug": {
-                "query": original_query,
-                "query_effective": effective_query,
-                "query_rewritten": (
-                    effective_query
-                    if rewrite_debug.get("used") and effective_query != original_query
-                    else None
-                ),
-                "query_rewrite": rewrite_debug,
-                "cached": False,
-                "cache": {
-                    "hit": False,
-                    "cache_id": None,
-                    "lookup_order": cache_lookup_order,
-                    "hit_query": None,
-                },
-                "glossary": glossary,
-                "retrieval": retrieval_debug_summary,
-                "sources": sources,
-                "llm_request": None,
-                "llm_response_text": "",
-                "error": "No context available",
-            },
-        }
-        yield {"type": "sources", "sources": sources}
-        yield {"type": "done"}
-        return
+    active_pass = first_pass
+    llm_request = None
+    llm_response_text = ""
+    llm_guard_result = {"idk_prefix": False, "text": ""}
 
     client = OpenAI(http_client=httpx.Client(verify=False))
-    t_llm = time.perf_counter()
-    system_text, user_text = _build_llm_prompt(effective_query, context)
-    stream = client.responses.create(
-        model=LLM_MODEL,
-        reasoning={"effort": "none"},
-        text={"verbosity": "low"},
-        input=[
-            {"role": "system", "content": [{"type": "input_text", "text": system_text}]},
-            {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
-        ],
-        stream=True,
-    )
 
-    response_parts = []
-    for event in stream:
-        if _event_get(event, "type") == "response.output_text.delta":
-            delta = _event_get(event, "delta")
-            if delta:
-                response_parts.append(delta)
-                yield {"type": "delta", "text": delta}
+    def _run_stream_attempt(context_text: str) -> tuple[dict, dict]:
+        system_text_local, user_text_local = _build_llm_prompt(effective_query, context_text)
+        request_payload = {
+            "model": LLM_MODEL,
+            "system_text": system_text_local,
+            "user_text": user_text_local,
+        }
+        attempt = _stream_llm_with_prefix_guard(
+            client,
+            system_text=system_text_local,
+            user_text=user_text_local,
+        )
+        t_llm = time.perf_counter()
+        result = {"idk_prefix": False, "text": ""}
+        while True:
+            try:
+                event = next(attempt)
+            except StopIteration as stop:
+                result = stop.value or {"idk_prefix": False, "text": ""}
+                break
+            else:
+                yield event
+        print(f"timing: llm_stream_attempt {time.perf_counter() - t_llm:.3f}s")
+        return request_payload, result
 
-    llm_response_text = "".join(response_parts)
-    print(f"timing: llm_stream {time.perf_counter() - t_llm:.3f}s")
+    if not first_pass["context"]:
+        fallback_debug["triggered"] = True
+        fallback_debug["reason"] = "no_context"
+        retry_config = _retry_retrieval_config(retrieval_top_k, max_extracts)
+        fallback_debug["retry_config"] = retry_config
+        second_pass = _run_retrieval_pass(
+            db,
+            original_query=original_query,
+            effective_query=effective_query,
+            retrieval_top_k=retry_config["top_k"],
+            max_extracts=retry_config["max_extracts"],
+            glossary_included=bool(glossary["included"]),
+        )
+        fallback_debug["second_pass_retrieval"] = second_pass["retrieval_summary"]
+        active_pass = second_pass
+        if second_pass["context"]:
+            stream_attempt = _run_stream_attempt(second_pass["context"])
+            while True:
+                try:
+                    event = next(stream_attempt)
+                except StopIteration as stop:
+                    llm_request, llm_guard_result = stop.value or (None, {"idk_prefix": False, "text": ""})
+                    break
+                else:
+                    yield event
+            llm_response_text = str(llm_guard_result.get("text", ""))
+            if llm_guard_result.get("idk_prefix"):
+                fallback_debug["reason"] = "retry_still_insufficient"
+                if loop_guard_candidate:
+                    fallback_debug["loop_guard_applied"] = True
+                    fallback_debug["final_mode"] = "answer"
+                    fallback_debug["answer_mode"] = "loop_guard_best_effort"
+                    stripped = _strip_idk_prefix(llm_response_text)
+                    if stripped and not stripped.endswith("?"):
+                        llm_response_text = stripped
+                    else:
+                        llm_request = None
+                        llm_response_text = _build_best_effort_answer(
+                            query=effective_query,
+                            context=second_pass["context"],
+                            history=history,
+                        )
+                else:
+                    fallback_debug["final_mode"] = "clarify"
+                    llm_request = None
+                    llm_response_text = _build_clarifying_question(
+                        original_query=original_query,
+                        effective_query=effective_query,
+                        history=history,
+                        sources=second_pass["sources"],
+                    )
+                yield {"type": "delta", "text": llm_response_text}
+            else:
+                fallback_debug["answer_mode"] = "normal"
+        else:
+            fallback_debug["reason"] = "retry_still_insufficient"
+            if loop_guard_candidate:
+                fallback_debug["loop_guard_applied"] = True
+                fallback_debug["final_mode"] = "answer"
+                fallback_debug["answer_mode"] = "loop_guard_best_effort"
+                llm_response_text = _build_best_effort_answer(
+                    query=effective_query,
+                    context=first_pass["context"] or "",
+                    history=history,
+                )
+            else:
+                fallback_debug["final_mode"] = "clarify"
+                llm_response_text = _build_clarifying_question(
+                    original_query=original_query,
+                    effective_query=effective_query,
+                    history=history,
+                    sources=second_pass["sources"],
+                )
+            yield {"type": "delta", "text": llm_response_text}
+    else:
+        stream_attempt = _run_stream_attempt(first_pass["context"])
+        while True:
+            try:
+                event = next(stream_attempt)
+            except StopIteration as stop:
+                llm_request, llm_guard_result = stop.value or (None, {"idk_prefix": False, "text": ""})
+                break
+            else:
+                yield event
+        llm_response_text = str(llm_guard_result.get("text", ""))
+        if llm_guard_result.get("idk_prefix"):
+            fallback_debug["triggered"] = True
+            fallback_debug["reason"] = "idk_prefix"
+            retry_config = _retry_retrieval_config(retrieval_top_k, max_extracts)
+            fallback_debug["retry_config"] = retry_config
+            second_pass = _run_retrieval_pass(
+                db,
+                original_query=original_query,
+                effective_query=effective_query,
+                retrieval_top_k=retry_config["top_k"],
+                max_extracts=retry_config["max_extracts"],
+                glossary_included=bool(glossary["included"]),
+            )
+            fallback_debug["second_pass_retrieval"] = second_pass["retrieval_summary"]
+            active_pass = second_pass
+            if second_pass["context"]:
+                stream_attempt_retry = _run_stream_attempt(second_pass["context"])
+                while True:
+                    try:
+                        event = next(stream_attempt_retry)
+                    except StopIteration as stop:
+                        llm_request, llm_guard_result = stop.value or (None, {"idk_prefix": False, "text": ""})
+                        break
+                    else:
+                        yield event
+                llm_response_text = str(llm_guard_result.get("text", ""))
+                if llm_guard_result.get("idk_prefix"):
+                    fallback_debug["reason"] = "retry_still_insufficient"
+                    if loop_guard_candidate:
+                        fallback_debug["loop_guard_applied"] = True
+                        fallback_debug["final_mode"] = "answer"
+                        fallback_debug["answer_mode"] = "loop_guard_best_effort"
+                        stripped = _strip_idk_prefix(llm_response_text)
+                        if stripped and not stripped.endswith("?"):
+                            llm_response_text = stripped
+                        else:
+                            llm_request = None
+                            llm_response_text = _build_best_effort_answer(
+                                query=effective_query,
+                                context=second_pass["context"],
+                                history=history,
+                            )
+                    else:
+                        fallback_debug["final_mode"] = "clarify"
+                        llm_request = None
+                        llm_response_text = _build_clarifying_question(
+                            original_query=original_query,
+                            effective_query=effective_query,
+                            history=history,
+                            sources=second_pass["sources"],
+                        )
+                    yield {"type": "delta", "text": llm_response_text}
+                else:
+                    fallback_debug["answer_mode"] = "normal"
+            else:
+                fallback_debug["reason"] = "retry_still_insufficient"
+                if loop_guard_candidate:
+                    fallback_debug["loop_guard_applied"] = True
+                    fallback_debug["final_mode"] = "answer"
+                    fallback_debug["answer_mode"] = "loop_guard_best_effort"
+                    llm_request = None
+                    llm_response_text = _build_best_effort_answer(
+                        query=effective_query,
+                        context=first_pass["context"] or "",
+                        history=history,
+                    )
+                else:
+                    fallback_debug["final_mode"] = "clarify"
+                    llm_request = None
+                    llm_response_text = _build_clarifying_question(
+                        original_query=original_query,
+                        effective_query=effective_query,
+                        history=history,
+                        sources=second_pass["sources"],
+                    )
+                yield {"type": "delta", "text": llm_response_text}
+        elif fallback_debug["triggered"]:
+            fallback_debug["answer_mode"] = "normal"
+
     print(f"timing: total {time.perf_counter() - t0:.3f}s")
     yield {
         "type": "debug",
@@ -592,17 +1039,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                 "hit_query": None,
             },
             "glossary": glossary,
-            "retrieval": retrieval_debug_summary,
-            "sources": sources,
-            "llm_request": {
-                "model": LLM_MODEL,
-                "system_text": system_text,
-                "user_text": user_text,
-            },
+            "retrieval": active_pass["retrieval_summary"],
+            "sources": active_pass["sources"],
+            "llm_request": llm_request,
             "llm_response_text": llm_response_text,
+            "fallback": fallback_debug,
         },
     }
-    yield {"type": "sources", "sources": sources}
+    yield {"type": "sources", "sources": active_pass["sources"]}
     yield {"type": "done"}
 
 
@@ -630,6 +1074,10 @@ if __name__ == "__main__":
     chunk = test_db.t.chunks.insert(extract_id=extract["id"], chunk_index=0, text="hello world")
     assert _build_llm_prompt("q", "ctx")[0].startswith("Answer the question")
     assert _event_get({"type": "x"}, "type") == "x"
+    assert _is_idk_like_response("I don't know based on the provided context.")
+    assert not _is_idk_like_response("Here is what I found in the context.")
+    retry_cfg = _retry_retrieval_config(40, 6)
+    assert retry_cfg == {"top_k": 120, "max_extracts": 12}
     hydrated = _hydrate_sources_with_last_scraped(test_db, [{"url": "https://example.com/doc"}])
     assert hydrated and hydrated[0]["last_scraped"] == "now"
     assert page["id"] and extract["id"] and chunk["id"]

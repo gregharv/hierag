@@ -226,3 +226,140 @@ def test_stream_passes_prior_turn_history(client: TestClient, monkeypatch):
         "What is MyWay?",
         "answer-1",
     ]
+
+
+def test_build_rewrite_history_includes_fallback_metadata(client: TestClient):
+    import interfaces.api.main as main
+    import core.service as service
+    import json
+
+    create_chat = client.post(
+        "/api/chats",
+        json={"title": "History Metadata"},
+        headers={"x-profile-ip": "3.4.5.6"},
+    )
+    assert create_chat.status_code == 200
+    chat_id = create_chat.json()["chat"]["id"]
+
+    first_turn = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"message": "Customer is off for nonpayment"},
+        headers={"x-profile-ip": "3.4.5.6"},
+    )
+    assert first_turn.status_code == 200
+    first_payload = first_turn.json()
+    service.update_message(
+        first_payload["assistant_message_id"],
+        content="What is the specific customer program or plan?",
+        debug_json=json.dumps(
+            {
+                "fallback": {
+                    "triggered": True,
+                    "reason": "retry_still_insufficient",
+                    "final_mode": "clarify",
+                }
+            },
+            ensure_ascii=True,
+        ),
+    )
+
+    second_turn = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"message": "traditional"},
+        headers={"x-profile-ip": "3.4.5.6"},
+    )
+    assert second_turn.status_code == 200
+    second_payload = second_turn.json()
+
+    history = main._build_rewrite_history(chat_id=chat_id, assistant_message_id=second_payload["assistant_message_id"])
+    assistant_items = [item for item in history if item.get("role") == "assistant"]
+    assert assistant_items
+    last_assistant = assistant_items[-1]
+    assert last_assistant["content"] == "What is the specific customer program or plan?"
+    assert last_assistant["fallback_final_mode"] == "clarify"
+    assert last_assistant["message_id"] == first_payload["assistant_message_id"]
+
+
+def test_stream_persists_fallback_debug_payload(client: TestClient, monkeypatch):
+    import interfaces.api.main as main
+
+    class FakeLLM:
+        def stream_answer_with_context(self, query, top_k=10, max_extracts=6, history=None):
+            _ = (query, top_k, max_extracts, history)
+            yield {"type": "delta", "text": "Can you clarify the customer type and program?"}
+            yield {"type": "sources", "sources": [{"url": "https://connections/?docs=residential/alpha"}]}
+            yield {
+                "type": "debug",
+                "debug": {
+                    "query": "Need help",
+                    "query_effective": "Need help",
+                    "query_rewritten": None,
+                    "query_rewrite": {"used": False, "reason": "no_history"},
+                    "cached": False,
+                    "cache": {"hit": False, "cache_id": None, "lookup_order": ["Need help"], "hit_query": None},
+                    "glossary": {"included": False, "trigger_terms": [], "reason": "no_match"},
+                    "retrieval": {"ranked_chunks": []},
+                    "sources": [{"url": "https://connections/?docs=residential/alpha"}],
+                    "llm_request": None,
+                    "llm_response_text": "Can you clarify the customer type and program?",
+                    "fallback": {
+                        "triggered": True,
+                        "reason": "retry_still_insufficient",
+                        "final_mode": "answer",
+                        "first_pass_retrieval": {"ranked_chunks": []},
+                        "second_pass_retrieval": {"ranked_chunks": []},
+                        "retry_config": {"top_k": 120, "max_extracts": 10},
+                        "loop_guard_applied": True,
+                        "clarify_turns_recent": 1,
+                        "answer_mode": "loop_guard_best_effort",
+                    },
+                },
+            }
+            yield {"type": "done"}
+
+    monkeypatch.setattr(main, "_load_llmapi", lambda: FakeLLM())
+
+    create_chat = client.post(
+        "/api/chats",
+        json={"title": "Fallback Debug"},
+        headers={"x-profile-ip": "7.8.9.10"},
+    )
+    assert create_chat.status_code == 200
+    chat_id = create_chat.json()["chat"]["id"]
+
+    create_msg = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"message": "Need help"},
+        headers={"x-profile-ip": "7.8.9.10"},
+    )
+    assert create_msg.status_code == 200
+    payload = create_msg.json()
+
+    stream_resp = client.post(
+        "/api/stream",
+        headers={"x-profile-ip": "7.8.9.10", "Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "message": "Need help",
+            "stream_id": payload["stream_id"],
+            "message_id": str(payload["assistant_message_id"]),
+            "chat_id": str(chat_id),
+        },
+    )
+    assert stream_resp.status_code == 200
+    assert "event: delta" in stream_resp.text
+    assert "event: debug" in stream_resp.text
+    assert "event: done" in stream_resp.text
+
+    debug_resp = client.get(
+        f"/api/messages/{payload['assistant_message_id']}/debug",
+        headers={"x-profile-ip": "7.8.9.10"},
+    )
+    assert debug_resp.status_code == 200
+    debug = debug_resp.json()["debug"]
+    assert debug["fallback"]["triggered"] is True
+    assert debug["fallback"]["reason"] == "retry_still_insufficient"
+    assert debug["fallback"]["final_mode"] == "answer"
+    assert debug["fallback"]["retry_config"] == {"top_k": 120, "max_extracts": 10}
+    assert debug["fallback"]["loop_guard_applied"] is True
+    assert debug["fallback"]["clarify_turns_recent"] == 1
+    assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
