@@ -4,6 +4,7 @@ import hashlib
 import html
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import sys
@@ -46,6 +47,8 @@ HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
 _LLMAPI = None
 _SCRAPER_DB = None
 _TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
+_STREAM_ERROR_FALLBACK = "I hit a temporary problem generating a response. Please try again."
+logger = logging.getLogger(__name__)
 
 
 class ChatCreate(BaseModel):
@@ -327,6 +330,36 @@ def _avatar_from_ip(ip: str) -> dict[str, str]:
 
 def _user_id(request: Request) -> int:
     return service.get_or_create_user_by_ip(_client_ip(request))
+
+
+def _normalize_stream_error_message(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return _STREAM_ERROR_FALLBACK
+    if text.lower() in {"none", "unknown error", "unknown"}:
+        return _STREAM_ERROR_FALLBACK
+    return text
+
+
+def _persist_assistant_stream_state(
+    *,
+    message_id: int,
+    content: str,
+    sources: list[dict[str, object]],
+    debug_payload: dict | None,
+    cache_id: object | None,
+) -> None:
+    service.update_message(
+        message_id,
+        content=content,
+        sources_json=json.dumps(sources, ensure_ascii=True),
+        debug_json=(
+            json.dumps(debug_payload, ensure_ascii=True)
+            if debug_payload is not None
+            else None
+        ),
+        cached_from=cache_id,
+    )
 
 
 def _build_rewrite_history(chat_id: int, assistant_message_id: int, limit: int = 50) -> list[dict[str, object]]:
@@ -867,6 +900,7 @@ def stream(
 ):
     _ = stream_id
     user_id = _user_id(request)
+    client_ip = _client_ip(request)
     if not service.chat_belongs_to_user(chat_id, user_id):
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -900,23 +934,56 @@ def stream(
                     debug_payload = event.get("debug")
                     yield "event: debug\ndata: {\"available\": true}\n\n"
                 elif etype == "error":
-                    payload = {"error": event.get("error", "Unknown error")}
-                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
-                elif etype == "done":
-                    service.update_message(
-                        message_id,
+                    error_text = _normalize_stream_error_message(event.get("error"))
+                    if not full_text.strip():
+                        full_text = error_text
+                    _persist_assistant_stream_state(
+                        message_id=message_id,
                         content=full_text,
-                        sources_json=json.dumps(sources, ensure_ascii=True),
-                        debug_json=(
-                            json.dumps(debug_payload, ensure_ascii=True)
-                            if debug_payload is not None
-                            else None
-                        ),
-                        cached_from=cache_id,
+                        sources=sources,
+                        debug_payload=debug_payload,
+                        cache_id=cache_id,
+                    )
+                    logger.warning(
+                        "Stream error event: chat_id=%s message_id=%s user_id=%s client_ip=%s error=%s",
+                        chat_id,
+                        message_id,
+                        user_id,
+                        client_ip,
+                        error_text,
+                    )
+                    payload = {"error": error_text}
+                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
+                    return
+                elif etype == "done":
+                    _persist_assistant_stream_state(
+                        message_id=message_id,
+                        content=full_text,
+                        sources=sources,
+                        debug_payload=debug_payload,
+                        cache_id=cache_id,
                     )
                     yield "event: done\ndata: {}\n\n"
         except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'error': str(exc)}, ensure_ascii=True)}\n\n"
+            error_text = _normalize_stream_error_message(str(exc))
+            if not full_text.strip():
+                full_text = error_text
+            _persist_assistant_stream_state(
+                message_id=message_id,
+                content=full_text,
+                sources=sources,
+                debug_payload=debug_payload,
+                cache_id=cache_id,
+            )
+            logger.exception(
+                "Stream exception: chat_id=%s message_id=%s user_id=%s client_ip=%s",
+                chat_id,
+                message_id,
+                user_id,
+                client_ip,
+            )
+            payload = {"error": error_text}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

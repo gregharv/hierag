@@ -65,7 +65,7 @@ Per-page URL pattern:
 Run refresh manually:
 
 ```bash
-uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 3 --prune-status-codes 404,410
+uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 1 --prune-status-codes 404,410
 ```
 
 Windows scheduler script:
@@ -78,6 +78,18 @@ Windows scheduler script:
 Nightly logging outputs:
 
 - Full run log: `data/logs/connections-refresh_<YYYY-MM-DD>_<HHMM>.log`
+
+Nightly snapshot behavior:
+
+- Before each refresh run, snapshots are attempted for `data/app_runtime.db` and `data/scraper.db`.
+- Snapshot directory: `data/snapshots/nightly/`
+- Snapshot filename format: `<db_stem>-YYYYMMDD-HHMMSS.db`
+- Retention: snapshots older than 14 days are removed.
+- Snapshot failures are fail-open: warnings are logged and refresh continues.
+
+Operational note:
+
+- After first deployment of stale-cache hardening, do a one-time API process restart after cleanup to clear any preloaded retrieval cache state.
 
 ## Verification Pattern
 

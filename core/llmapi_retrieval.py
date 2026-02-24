@@ -127,6 +127,36 @@ def extract_tab_step_anchors(html: str) -> list[str]:
     return [f"#tab-step{num}" for num in sorted(step_numbers)]
 
 
+def _is_missing_row_error(exc: Exception) -> bool:
+    name = (exc.__class__.__name__ or "").lower()
+    if name == "notfounderror":
+        return True
+    module = (exc.__class__.__module__ or "").lower()
+    return "apswutils" in module and "notfound" in name
+
+
+def _safe_get_row(table, row_id: int):
+    try:
+        return table[row_id]
+    except Exception as exc:
+        if _is_missing_row_error(exc):
+            return None
+        raise
+
+
+def _resolve_chunk_lineage(db, chunk_id: int):
+    chunk = _safe_get_row(db.t.chunks, int(chunk_id))
+    if not chunk:
+        return None
+    extract = _safe_get_row(db.t.extracts, int(chunk.get("extract_id") or 0))
+    if not extract:
+        return None
+    page = _safe_get_row(db.t.pages, int(extract.get("page_id") or 0))
+    if not page:
+        return None
+    return chunk, extract, page
+
+
 def _build_retrieval_cache(db):
     embeddings = list(db.t.embeddings())
     if not embeddings:
@@ -139,12 +169,17 @@ def _build_retrieval_cache(db):
     doc_freq = defaultdict(int)
     term_postings = defaultdict(list)
 
-    for idx, row in enumerate(embeddings):
+    stale_embedding_rows = 0
+    for row in embeddings:
         chunk_id = row["chunk_id"]
-        chunk = db.t.chunks[chunk_id]
+        chunk = _safe_get_row(db.t.chunks, int(chunk_id))
+        if not chunk:
+            stale_embedding_rows += 1
+            continue
         text = chunk["text"] or ""
         tokens = _tokenize_for_bm25(text)
         tf = Counter(tokens)
+        posting_idx = len(chunk_ids)
 
         chunk_ids.append(chunk_id)
         chunk_texts.append(text)
@@ -153,7 +188,12 @@ def _build_retrieval_cache(db):
 
         for term, count in tf.items():
             doc_freq[term] += 1
-            term_postings[term].append((idx, count))
+            term_postings[term].append((posting_idx, count))
+
+    if not vectors:
+        if RETRIEVAL_DEBUG and stale_embedding_rows > 0:
+            print(f"hybrid_debug: cache build skipped stale embedding rows={stale_embedding_rows}")
+        return None
 
     emb_matrix = np.vstack(vectors).astype(np.float32)
     doc_lens_arr = np.array(doc_lens, dtype=np.float32)
@@ -231,13 +271,13 @@ def _bm25_scores(cache: Dict, query_terms: Sequence[str]) -> np.ndarray:
     return scores
 
 
-def search_embeddings_with_debug(db, query, top_k=5):
-    """Hybrid retrieval with debug metadata for candidates and fused ranking."""
+def _search_embeddings_with_debug_once(db, query, top_k=5):
+    """Hybrid retrieval pass with stale row skipping but no cache refresh retry."""
     t0 = time.perf_counter()
     cache = _get_retrieval_cache(db)
     if not cache:
         print("No embeddings found in database")
-        return [], {"query": query, "error": "No embeddings found in database"}
+        return [], {"query": query, "error": "No embeddings found in database"}, 0
 
     query_variants = _expand_query_variants(query)
     vector_t0 = time.perf_counter()
@@ -259,19 +299,24 @@ def search_embeddings_with_debug(db, query, top_k=5):
 
     fusion_t0 = time.perf_counter()
     if vector_idx.size == 0 and bm25_idx.size == 0:
-        return [], {
-            "query": query,
-            "query_variants": query_variants,
-            "candidate_counts": {"vector": 0, "bm25": 0, "merged": 0},
-            "timings": {
-                "vector_s": vector_elapsed,
-                "bm25_s": bm25_elapsed,
-                "fusion_s": 0.0,
-                "total_s": time.perf_counter() - t0,
+        return (
+            [],
+            {
+                "query": query,
+                "query_variants": query_variants,
+                "candidate_counts": {"vector": 0, "bm25": 0, "merged": 0},
+                "timings": {
+                    "vector_s": vector_elapsed,
+                    "bm25_s": bm25_elapsed,
+                    "fusion_s": 0.0,
+                    "total_s": time.perf_counter() - t0,
+                },
+                "ranked_chunks": [],
+                "by_chunk_id": {},
+                "stale_candidates_skipped": 0,
             },
-            "ranked_chunks": [],
-            "by_chunk_id": {},
-        }
+            0,
+        )
 
     candidate_idx = np.unique(np.concatenate([vector_idx, bm25_idx]))
     candidate_vector = vector_scores[candidate_idx]
@@ -288,15 +333,19 @@ def search_embeddings_with_debug(db, query, top_k=5):
     chunk_ids = cache["chunk_ids"]
     vector_set = set(vector_idx.tolist())
     bm25_set = set(bm25_idx.tolist())
-    for pos in order[: int(top_k)]:
+    stale_candidates_skipped = 0
+    for pos in order:
+        if len(scored) >= int(top_k):
+            break
         idx = int(candidate_idx[pos])
         chunk_id = int(chunk_ids[idx])
         fusion_score = float(fusion_scores[pos])
+        lineage = _resolve_chunk_lineage(db, chunk_id)
+        if not lineage:
+            stale_candidates_skipped += 1
+            continue
+        chunk, extract, page = lineage
         scored.append((fusion_score, chunk_id))
-
-        chunk = db.t.chunks[chunk_id]
-        extract = db.t.extracts[chunk["extract_id"]]
-        page = db.t.pages[extract["page_id"]]
         item = {
             "rank": len(ranked_chunks) + 1,
             "score": fusion_score,
@@ -354,8 +403,37 @@ def search_embeddings_with_debug(db, query, top_k=5):
         },
         "ranked_chunks": ranked_chunks,
         "by_chunk_id": by_chunk_id,
+        "stale_candidates_skipped": int(stale_candidates_skipped),
     }
-    return scored[:top_k], debug
+    return scored[:top_k], debug, stale_candidates_skipped
+
+
+def search_embeddings_with_debug(db, query, top_k=5):
+    """Hybrid retrieval with debug metadata for candidates and fused ranking."""
+    scored, debug, stale_candidates_skipped = _search_embeddings_with_debug_once(
+        db,
+        query,
+        top_k=top_k,
+    )
+    if stale_candidates_skipped <= 0:
+        return scored, debug
+
+    try:
+        refresh_retrieval_cache(db)
+    except Exception as exc:
+        debug["cache_refresh_retry"] = False
+        debug["cache_refresh_retry_error"] = str(exc) or exc.__class__.__name__
+        return scored, debug
+
+    retried_scored, retried_debug, retried_stale = _search_embeddings_with_debug_once(
+        db,
+        query,
+        top_k=top_k,
+    )
+    retried_debug["cache_refresh_retry"] = True
+    retried_debug["stale_candidates_skipped_initial"] = int(stale_candidates_skipped)
+    retried_debug["stale_candidates_skipped_after_refresh"] = int(retried_stale)
+    return retried_scored, retried_debug
 
 
 def search_embeddings(db, query, top_k=5):
@@ -370,13 +448,14 @@ def get_parent_extracts(db, scored_results, max_extracts=None):
     seen_urls = set()
 
     for score, chunk_id in scored_results:
-        chunk = db.t.chunks[chunk_id]
+        lineage = _resolve_chunk_lineage(db, int(chunk_id))
+        if not lineage:
+            continue
+        chunk, extract, page = lineage
         extract_id = chunk["extract_id"]
         if extract_id in seen_extract_ids:
             continue
 
-        extract = db.t.extracts[extract_id]
-        page = db.t.pages[extract["page_id"]]
         url_canonical = canonicalize_source_url(page["url"])
         if url_canonical and url_canonical in seen_urls:
             continue
@@ -419,13 +498,14 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
     seen_urls = set()
 
     for score, chunk_id in scored_results:
-        chunk = db.t.chunks[chunk_id]
+        lineage = _resolve_chunk_lineage(db, int(chunk_id))
+        if not lineage:
+            continue
+        chunk, extract, page = lineage
         extract_id = chunk["extract_id"]
         if extract_id in seen_extract_ids:
             continue
 
-        extract = db.t.extracts[extract_id]
-        page = db.t.pages[extract["page_id"]]
         url = page["url"]
         url_canonical = canonicalize_source_url(url)
         if url_canonical and url_canonical in seen_urls:

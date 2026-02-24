@@ -397,3 +397,112 @@ def test_stream_persists_fallback_debug_payload(client: TestClient, monkeypatch)
     assert debug["fallback"]["loop_guard_applied"] is True
     assert debug["fallback"]["clarify_turns_recent"] == 1
     assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
+
+
+def test_stream_error_event_uses_friendly_message_and_persists(client: TestClient, monkeypatch):
+    import interfaces.api.main as main
+
+    class FakeLLM:
+        def stream_answer_with_context(self, query, top_k=10, max_extracts=6, history=None):
+            _ = (query, top_k, max_extracts, history)
+            yield {"type": "error", "error": None}
+
+    monkeypatch.setattr(main, "_load_llmapi", lambda: FakeLLM())
+
+    create_chat = client.post(
+        "/api/chats",
+        json={"title": "Friendly Error"},
+        headers={"x-profile-ip": "8.8.8.8"},
+    )
+    assert create_chat.status_code == 200
+    chat_id = create_chat.json()["chat"]["id"]
+
+    create_msg = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"message": "elephant"},
+        headers={"x-profile-ip": "8.8.8.8"},
+    )
+    assert create_msg.status_code == 200
+    payload = create_msg.json()
+    assistant_message_id = int(payload["assistant_message_id"])
+
+    stream_resp = client.post(
+        "/api/stream",
+        headers={"x-profile-ip": "8.8.8.8", "Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "message": "elephant",
+            "stream_id": payload["stream_id"],
+            "message_id": str(assistant_message_id),
+            "chat_id": str(chat_id),
+        },
+    )
+    assert stream_resp.status_code == 200
+    assert "event: error" in stream_resp.text
+    assert main._STREAM_ERROR_FALLBACK in stream_resp.text
+
+    messages_resp = client.get(
+        f"/api/chats/{chat_id}/messages?limit=20",
+        headers={"x-profile-ip": "8.8.8.8"},
+    )
+    assert messages_resp.status_code == 200
+    assistant_row = next(
+        item for item in messages_resp.json()["messages"] if int(item["id"]) == assistant_message_id
+    )
+    assert assistant_row["content"] == main._STREAM_ERROR_FALLBACK
+
+
+def test_stream_exception_uses_friendly_message_and_persists(client: TestClient, monkeypatch):
+    import interfaces.api.main as main
+
+    class EmptyMessageError(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    class FakeLLM:
+        def stream_answer_with_context(self, query, top_k=10, max_extracts=6, history=None):
+            _ = (query, top_k, max_extracts, history)
+            raise EmptyMessageError()
+            yield {"type": "done"}  # pragma: no cover
+
+    monkeypatch.setattr(main, "_load_llmapi", lambda: FakeLLM())
+
+    create_chat = client.post(
+        "/api/chats",
+        json={"title": "Exception Error"},
+        headers={"x-profile-ip": "8.8.4.4"},
+    )
+    assert create_chat.status_code == 200
+    chat_id = create_chat.json()["chat"]["id"]
+
+    create_msg = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"message": "elephant"},
+        headers={"x-profile-ip": "8.8.4.4"},
+    )
+    assert create_msg.status_code == 200
+    payload = create_msg.json()
+    assistant_message_id = int(payload["assistant_message_id"])
+
+    stream_resp = client.post(
+        "/api/stream",
+        headers={"x-profile-ip": "8.8.4.4", "Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "message": "elephant",
+            "stream_id": payload["stream_id"],
+            "message_id": str(assistant_message_id),
+            "chat_id": str(chat_id),
+        },
+    )
+    assert stream_resp.status_code == 200
+    assert "event: error" in stream_resp.text
+    assert main._STREAM_ERROR_FALLBACK in stream_resp.text
+
+    messages_resp = client.get(
+        f"/api/chats/{chat_id}/messages?limit=20",
+        headers={"x-profile-ip": "8.8.4.4"},
+    )
+    assert messages_resp.status_code == 200
+    assistant_row = next(
+        item for item in messages_resp.json()["messages"] if int(item["id"]) == assistant_message_id
+    )
+    assert assistant_row["content"] == main._STREAM_ERROR_FALLBACK

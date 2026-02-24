@@ -194,7 +194,7 @@ def run_daily_connections_refresh(
     refresh_cache: bool = True,
     scrape_only: bool = False,
     prune_missing: bool = False,
-    prune_missing_after: int = 3,
+    prune_missing_after: int = 1,
     prune_status_codes: list[int] | tuple[int, ...] | None = None,
     progress_log_every: int = 10,
 ):
@@ -534,7 +534,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-non-html", action="store_true")
     parser.add_argument("--no-cache-refresh", action="store_true")
     parser.add_argument("--prune-missing", action="store_true")
-    parser.add_argument("--prune-missing-after", type=int, default=3)
+    parser.add_argument("--prune-missing-after", type=int, default=1)
     parser.add_argument("--prune-status-codes", type=str, default="404,410")
     parser.add_argument("--progress-log-every", type=int, default=10)
     parser.add_argument("--check", action="store_true")

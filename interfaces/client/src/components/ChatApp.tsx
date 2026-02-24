@@ -13,6 +13,8 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
+const STREAM_ERROR_FALLBACK_MESSAGE =
+  "I hit a temporary problem generating a response. Please try again.";
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 const PROCEDURE_LINKS_MAX = 3;
@@ -519,7 +521,9 @@ export function ChatApp() {
     if (!response.ok || !response.body) {
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId ? { ...m, content: "Error streaming response." } : m
+          m.id === assistantId
+            ? { ...m, content: STREAM_ERROR_FALLBACK_MESSAGE }
+            : m
         )
       );
       return;
@@ -574,7 +578,12 @@ export function ChatApp() {
         } else if (eventType === "debug") {
           updateAssistant({ has_debug: true });
         } else if (eventType === "error") {
-          updateAssistant({ content: payload.error || "Error" });
+          const errorText =
+            String(payload?.error || "").trim() || STREAM_ERROR_FALLBACK_MESSAGE;
+          if (!fullText.trim()) {
+            fullText = errorText;
+          }
+          updateAssistant({ content: fullText });
         } else if (eventType === "done") {
           updateAssistant({ content: fullText, sources });
           scrollToBottom(true);

@@ -3,7 +3,7 @@ param(
     [string]$LogDir = "",
     [string]$PythonExe = "",
     [int]$SiteId = 2,
-    [int]$PruneMissingAfter = 3,
+    [int]$PruneMissingAfter = 1,
     [string]$PruneStatusCodes = "404,410",
     [string]$WeeklyCrawlDay = "",
     [int]$MaxPages = 3000
@@ -91,6 +91,69 @@ function Resolve-PythonExecutable {
     return ""
 }
 
+function Write-RefreshLog {
+    param(
+        [string]$Message,
+        [string]$LogPath
+    )
+
+    Write-Host $Message
+    Add-Content -Path $LogPath -Value $Message
+}
+
+function Invoke-DbSnapshots {
+    param(
+        [string]$ProjectRoot,
+        [string]$SnapshotDir,
+        [string]$Stamp,
+        [string]$LogPath,
+        [int]$RetentionDays = 14
+    )
+
+    New-Item -ItemType Directory -Force -Path $SnapshotDir | Out-Null
+    $dataDir = Join-Path $ProjectRoot "data"
+    $dbFiles = @("app_runtime.db", "scraper.db")
+
+    foreach ($dbFile in $dbFiles) {
+        $source = Join-Path $dataDir $dbFile
+        if (-not (Test-Path $source)) {
+            Write-RefreshLog -Message ("Snapshot warning: source DB not found: {0}" -f $source) -LogPath $LogPath
+            continue
+        }
+
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($dbFile)
+        $destination = Join-Path $SnapshotDir ("{0}-{1}.db" -f $baseName, $Stamp)
+        try {
+            Copy-Item -Path $source -Destination $destination -Force -ErrorAction Stop
+            Write-RefreshLog -Message ("Snapshot created: {0}" -f $destination) -LogPath $LogPath
+        } catch {
+            $err = $_.Exception.Message
+            Write-RefreshLog -Message ("Snapshot warning: failed to copy {0} -> {1} ({2})" -f $source, $destination, $err) -LogPath $LogPath
+        }
+    }
+
+    try {
+        $cutoff = (Get-Date).AddDays(-[Math]::Abs($RetentionDays))
+        $removed = 0
+        $oldSnapshots = Get-ChildItem -Path $SnapshotDir -Filter "*.db" -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.LastWriteTime -lt $cutoff
+        }
+        foreach ($snapshot in $oldSnapshots) {
+            try {
+                Remove-Item -Path $snapshot.FullName -Force -ErrorAction Stop
+                $removed += 1
+            } catch {
+                $err = $_.Exception.Message
+                Write-RefreshLog -Message ("Snapshot retention warning: failed to remove {0} ({1})" -f $snapshot.FullName, $err) -LogPath $LogPath
+            }
+        }
+        Write-RefreshLog -Message ("Snapshot retention cleanup: removed={0} cutoff_days={1}" -f $removed, [Math]::Abs($RetentionDays)) -LogPath $LogPath
+    } catch {
+        $err = $_.Exception.Message
+        Write-RefreshLog -Message ("Snapshot retention warning: {0}" -f $err) -LogPath $LogPath
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
@@ -104,6 +167,7 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logPath = Join-Path $LogDir "connections-refresh-$stamp.log"
 $historyPath = Join-Path $LogDir "connections-refresh-history.csv"
+$snapshotDir = Join-Path $ProjectRoot "data\snapshots\nightly"
 $today = (Get-Date).DayOfWeek.ToString()
 $doCrawl = $true
 if (-not [string]::IsNullOrWhiteSpace($WeeklyCrawlDay)) {
@@ -167,10 +231,10 @@ if (-not $doCrawl) {
 
 $startLine = "[{0}] Starting connections refresh (crawl={1}, day={2})" -f (Get-Date -Format s), $doCrawl, $today
 $commandLine = "$pythonExeResolved " + ($refreshArgs -join " ")
-Write-Host $startLine
-Write-Host $commandLine
-Add-Content -Path $logPath -Value $startLine
-Add-Content -Path $logPath -Value $commandLine
+Write-RefreshLog -Message $startLine -LogPath $logPath
+Write-RefreshLog -Message $commandLine -LogPath $logPath
+
+Invoke-DbSnapshots -ProjectRoot $ProjectRoot -SnapshotDir $snapshotDir -Stamp $stamp -LogPath $logPath -RetentionDays 14
 
 $runStart = Get-Date
 $previousErrorActionPreference = $ErrorActionPreference

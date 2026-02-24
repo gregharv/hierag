@@ -4,6 +4,11 @@ import core.daily_connections_refresh as refresh
 from core.fastlite_db import bootstrap_scraper_db
 
 
+def test_prune_missing_after_cli_default_is_one():
+    args = refresh._build_arg_parser().parse_args([])
+    assert args.prune_missing_after == 1
+
+
 def _seed_single_url(db, *, url: str = "https://connections/?docs=test", missing_streak: int = 0) -> None:
     site_id = 2
     row = db.t.discovered_urls.insert(
