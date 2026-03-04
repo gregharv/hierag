@@ -12,6 +12,13 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.10
+
+- **Date (UTC):** 2026-03-04
+- **Changed:** Removed visible trailing procedure-link blocks from responses, enabled source-only inline markdown hyperlink behavior, preserved yellow procedure-source highlighting, suppressed clarify follow-up questions when no sources are retrieved, and updated source metadata copy to include `(procedures in yellow)`.
+- **Why it matters:** Responses stay full-length and cleaner, links are safer and grounded in retrieved sources, users get clearer source cues, and off-topic/no-source turns avoid unnecessary follow-up questions.
+- **Affected areas:** `core/llmapi_flow.py`, `core/tests/test_llmapi_flow.py`, `interfaces/client/src/components/ChatApp.tsx`, `interfaces/client/src/components/ChatApp.stories.tsx`
+
 ## v0.1.9
 
 - **Date (UTC):** 2026-03-04

@@ -313,7 +313,7 @@ def test_stream_idk_prefix_retries_then_clarifies(monkeypatch):
     assert debug["llm_request"] is None
 
 
-def test_stream_no_context_retries_then_clarifies(monkeypatch):
+def test_stream_no_context_retries_without_sources_returns_no_sources_reply(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     search_calls = []
 
@@ -331,7 +331,7 @@ def test_stream_no_context_retries_then_clarifies(monkeypatch):
     monkeypatch.setattr(
         flow,
         "_build_clarifying_question",
-        lambda **_: "Can you clarify which exact policy and customer scenario you need?",
+        lambda **_: (_ for _ in ()).throw(AssertionError("clarifying question should not be generated")),
     )
 
     events = list(flow.stream_answer_with_context(db, "Need workflow steps", top_k=10, max_extracts=2))
@@ -341,10 +341,11 @@ def test_stream_no_context_retries_then_clarifies(monkeypatch):
     assert len(search_calls) == 2
     assert search_calls[0][1] >= 40
     assert search_calls[1][1] >= 120
-    assert final_text == "Can you clarify which exact policy and customer scenario you need?"
+    assert final_text == flow.OFF_TOPIC_NO_SOURCES_REPLY
     assert debug["fallback"]["triggered"] is True
     assert debug["fallback"]["reason"] == "retry_still_insufficient"
-    assert debug["fallback"]["final_mode"] == "clarify"
+    assert debug["fallback"]["final_mode"] == "out_of_scope"
+    assert debug["fallback"]["answer_mode"] == "off_topic_no_sources"
     assert debug["fallback"]["retry_config"] == {"top_k": 120, "max_extracts": 10}
     assert debug["fallback"]["first_pass_retrieval"]["ranked_chunks"] == []
     assert debug["fallback"]["second_pass_retrieval"]["ranked_chunks"] == []
@@ -529,44 +530,30 @@ def test_loop_guard_uses_best_effort_when_second_pass_idk_has_no_salvage(monkeyp
     assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
 
 
-def test_build_procedure_link_markdown_limits_to_one_and_dedupes():
+def test_build_allowed_source_links_for_prompt_dedupes_and_filters():
     sources = [
         {
-            "url": "https://connections/?docs=residential%2Falpha",
-            "url_canonical": "https://connections/?docs=residential/alpha",
-            "has_tab_steps": True,
+            "url": "https://connections/?docs=residential%2Falpha#tab-step2",
+            "url_canonical": "https://connections/?docs=residential/alpha#tab-step2",
             "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/alpha",
             "url_canonical": "https://connections/?docs=residential/alpha",
-            "has_tab_steps": True,
             "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/beta",
             "url_canonical": "https://connections/?docs=residential/beta",
-            "has_tab_steps": True,
             "vector_score_raw": 0.9,
         },
-        {
-            "url": "https://connections/?docs=residential/gamma",
-            "url_canonical": "https://connections/?docs=residential/gamma",
-            "has_tab_steps": True,
-            "vector_score_raw": 0.9,
-        },
-        {
-            "url": "https://connections/?docs=residential/delta",
-            "url_canonical": "https://connections/?docs=residential/delta",
-            "has_tab_steps": True,
-            "vector_score_raw": 0.9,
-        },
+        {"url": "https://connections/?docs=residential/gamma", "vector_score_raw": 0.64, "bm25_score_raw": 9.9},
     ]
-    block = flow._build_procedure_link_markdown("Answer", sources)
-    lines = [line for line in block.splitlines() if line.startswith("- [")]
-    assert len(lines) == 1
-    assert "#tab-step" not in block
-    assert "docs=residential/beta" not in block
+    links = flow._build_allowed_source_links_for_prompt(sources)
+    assert len(links) == 2
+    assert links[0]["url"] == "https://connections/?docs=residential/alpha"
+    assert links[1]["url"] == "https://connections/?docs=residential/beta"
+    assert all("#tab-step" not in item["url"] for item in links)
 
 
 def test_hydrate_sources_drops_items_without_raw_scores():
@@ -581,52 +568,26 @@ def test_hydrate_sources_drops_items_without_raw_scores():
     assert hydrated == []
 
 
-def test_build_procedure_link_markdown_recognizes_tab_step_fragment_without_metadata():
-    sources = [
-        {
-            "url": "https://connections/?docs=residential/alpha#tab-step2",
-            "url_canonical": "https://connections/?docs=residential/alpha#tab-step2",
-            "has_tab_steps": False,
-            "tab_step_count": 0,
-            "vector_score_raw": 0.9,
-        }
-    ]
-    block = flow._build_procedure_link_markdown("Answer", sources)
-    assert "Procedure links:" in block
-    assert "(https://connections/?docs=residential/alpha)" in block
-    assert "#tab-step" not in block
+def test_build_llm_prompt_includes_allowed_source_links_and_markdown_rule():
+    system_text, user_text = flow._build_llm_prompt(
+        "How do I handle this?",
+        "context excerpt",
+        sources=[{"url": "https://connections/?docs=residential/alpha", "vector_score_raw": 0.9}],
+    )
+    assert "Allowed source links" in user_text
+    assert "https://connections/?docs=residential/alpha" in user_text
+    assert "[text](url)" in system_text
+    assert "only with URLs listed under Allowed source links" in system_text
+    assert "Do not include a separate links section." in system_text
 
 
-def test_build_procedure_link_markdown_appends_even_if_url_in_answer():
-    source_url = "https://connections/?docs=residential/alpha"
-    sources = [
-        {
-            "url": source_url,
-            "url_canonical": source_url,
-            "has_tab_steps": True,
-            "vector_score_raw": 0.9,
-        }
-    ]
-    block = flow._build_procedure_link_markdown(f"See {source_url}", sources)
-    assert "Procedure links:" in block
-    assert f"({source_url})" in block
+def test_build_llm_prompt_procedure_mode_no_longer_forces_brevity():
+    system_text, _user_text = flow._build_llm_prompt("q", "ctx", procedure_mode=True, sources=[])
+    assert "Keep it extremely brief" not in system_text
+    assert "Procedure links" not in system_text
 
 
-def test_build_procedure_link_markdown_filters_low_score_sources():
-    sources = [
-        {
-            "url": "https://connections/?docs=residential/alpha",
-            "url_canonical": "https://connections/?docs=residential/alpha",
-            "has_tab_steps": True,
-            "vector_score_raw": 0.64,
-            "bm25_score_raw": 9.9,
-        }
-    ]
-    block = flow._build_procedure_link_markdown("Answer", sources)
-    assert block == ""
-
-
-def test_stream_cache_hit_appends_procedure_links_even_if_answer_contains_same_url(monkeypatch):
+def test_stream_cache_hit_does_not_append_procedure_links_even_if_answer_contains_same_url(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     chunk_id = sorted(chunk_meta.keys())[0]
     _set_tab_steps_for_chunk(db, chunk_id, steps=2)
@@ -648,10 +609,9 @@ def test_stream_cache_hit_appends_procedure_links_even_if_answer_contains_same_u
     debug = next(event["debug"] for event in events if event.get("type") == "debug")
     final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
 
-    assert final_text.startswith("Cached answer")
-    assert "Procedure links:" in final_text
-    assert "(https://connections/?docs=residential/alpha)" in final_text
-    assert "Procedure links:" in debug["llm_response_text"]
+    assert final_text == "Cached answer https://connections/?docs=residential/alpha"
+    assert "Procedure links:" not in final_text
+    assert "Procedure links:" not in debug["llm_response_text"]
     assert debug["cached"] is True
 
 

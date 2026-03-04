@@ -63,7 +63,15 @@ function createMockFetch(mode = "default") {
   ];
   const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
   const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
-  const storyVersion = "0.1.9";
+  const storyVersion = "0.1.10";
+  const assistantSeedContent =
+    mode === "markdown-links"
+      ? `Use [Broken arrangement](${defaultSources[0].url}), [Re-work arrangement](${defaultSources[1].url}), and [Broken arrangement copy](${defaultSources[2].url}). Ignore [non-source link](https://example.com/not-a-source).`
+      : "Try hybrid retrieval with score normalization, then tune reranking and chunk size.";
+  const streamAnswer =
+    mode === "markdown-links"
+      ? `Storybook mock answer: [primary source](${defaultSources[0].url}), [secondary source](${defaultSources[1].url}), and [external](https://example.com/external).`
+      : null;
   const chatOneMessages =
     mode === "source-collapse"
       ? [
@@ -79,8 +87,7 @@ function createMockFetch(mode = "default") {
           {
             id: 1002,
             role: "assistant",
-            content:
-              "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
+            content: assistantSeedContent,
             sources: seedAssistantSources,
             has_debug: true,
             created_at: "2026-02-23T09:01:03Z",
@@ -121,8 +128,7 @@ function createMockFetch(mode = "default") {
           {
             id: 1002,
             role: "assistant",
-            content:
-              "Try hybrid retrieval with score normalization, then tune reranking and chunk size.",
+            content: assistantSeedContent,
             sources: seedAssistantSources,
             has_debug: true,
             created_at: "2026-02-23T09:01:03Z",
@@ -246,7 +252,7 @@ function createMockFetch(mode = "default") {
     if (path === "/api/stream" && method === "POST") {
       const params = new URLSearchParams(String(init.body || ""));
       const prompt = params.get("message") || "";
-      const answer = `Storybook mock answer: ${prompt}`;
+      const answer = streamAnswer || `Storybook mock answer: ${prompt}`;
       return toSseResponse([
         { type: "delta", payload: { text: answer } },
         {
@@ -440,6 +446,20 @@ export const SourceCollapseDefaults: Story = {
       applyStoryUrl("default");
       return (
         <MockAppEnvironment mode="source-collapse">
+          <Story />
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const MarkdownSourceLinks: Story = {
+  name: "Markdown Source Links",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("default");
+      return (
+        <MockAppEnvironment mode="markdown-links">
           <Story />
         </MockAppEnvironment>
       );

@@ -17,7 +17,7 @@ const STREAM_ERROR_FALLBACK_MESSAGE =
   "I hit a temporary problem generating a response. Please try again.";
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
-const PROCEDURE_LINKS_MAX = 1;
+const INLINE_SOURCE_LINKS_MAX = 2;
 const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
   /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
 const TAB_STEP_FRAGMENT_RE = /#tab-step\d+\b/i;
@@ -223,82 +223,50 @@ function sourceEligibleForDisplay(source) {
   return sourceEligibleByRawScores(source);
 }
 
-function sourceEligibleForProcedureLinks(source) {
-  if (!sourceIsProcedure(source)) return false;
-  if (Object.prototype.hasOwnProperty.call(source || {}, "procedure_link_eligible")) {
-    return Boolean(source?.procedure_link_eligible);
-  }
-  return sourceEligibleForDisplay(source);
-}
-
-function stripUrlFragment(rawUrl) {
-  const value = String(rawUrl || "").trim();
-  if (!value) return "";
-  try {
-    const parsed = new URL(value, window.location.origin);
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return value.replace(/#.*$/, "");
-  }
-}
-
-function buildProcedureLinksFromSources(sources) {
-  const normalized = normalizeMessageSources(sources);
-  const candidates = normalized.filter(
-    (source) => sourceEligibleForProcedureLinks(source) && String(source?.link || "").trim()
-  );
-  const links = [];
-  for (const source of candidates) {
-    const href = stripUrlFragment(String(source?.link || "").trim());
-    if (!href) continue;
-    links.push({
-      label: String(source?.label || sourceLabelFromUrl(source) || "source"),
-      href,
-    });
-    if (links.length >= PROCEDURE_LINKS_MAX) break;
-  }
-  return links;
-}
-
 function stripTrailingProcedureLinksMarkdown(content) {
   const raw = String(content || "");
   return raw.replace(PROCEDURE_LINKS_TRAILING_BLOCK_RE, "");
 }
 
-function renderMarkdownWithSourceLinkBehavior(content, sources = []) {
-  const rawContent = String(content || "");
-  const hasTrailingProcedureBlock = PROCEDURE_LINKS_TRAILING_BLOCK_RE.test(rawContent);
-  const cleanedContent = stripTrailingProcedureLinksMarkdown(rawContent);
-  const html = String(marked.parse(cleanedContent || ""));
-  if (typeof document === "undefined") {
-    return html;
-  }
-  const wrapper = document.createElement("div");
-  wrapper.innerHTML = html;
+function replaceAnchorWithText(anchor) {
+  if (!anchor || !anchor.parentNode) return;
+  const text = anchor.textContent || "";
+  anchor.replaceWith(document.createTextNode(text));
+}
 
-  const procedureLinks = hasTrailingProcedureBlock ? buildProcedureLinksFromSources(sources) : [];
-  if (procedureLinks.length > 0) {
-    const heading = document.createElement("p");
-    heading.textContent = "Procedure links:";
-    const list = document.createElement("ul");
-    for (const item of procedureLinks) {
-      const li = document.createElement("li");
-      const anchor = document.createElement("a");
-      anchor.setAttribute("href", item.href);
-      anchor.textContent = item.label;
-      li.appendChild(anchor);
-      list.appendChild(li);
-    }
-    wrapper.appendChild(heading);
-    wrapper.appendChild(list);
-  }
+function sanitizeMarkdownAnchorsToSources(wrapper, sources = []) {
+  const allowedSources = normalizeMessageSources(sources);
+  const allowedKeys = new Set(allowedSources.map((source) => String(source?.canonical_key || "").trim()));
+  const linkedSourceKeys = new Set();
+  let keptLinkCount = 0;
 
   for (const anchor of wrapper.querySelectorAll("a[href]")) {
+    const rawHref = String(anchor.getAttribute("href") || "").trim();
+    const key = canonicalSourceKey({ url: rawHref });
+    if (!key || !allowedKeys.has(key) || keptLinkCount >= INLINE_SOURCE_LINKS_MAX) {
+      replaceAnchorWithText(anchor);
+      continue;
+    }
+    keptLinkCount += 1;
+    linkedSourceKeys.add(key);
     anchor.setAttribute("target", "_blank");
     anchor.setAttribute("rel", "noreferrer");
   }
-  return wrapper.innerHTML;
+
+  return Array.from(linkedSourceKeys);
+}
+
+function renderMarkdownWithSourceLinkBehavior(content, sources = []) {
+  const rawContent = String(content || "");
+  const cleanedContent = stripTrailingProcedureLinksMarkdown(rawContent);
+  const html = String(marked.parse(cleanedContent || ""));
+  if (typeof document === "undefined") {
+    return { html, linkedSourceKeys: [] };
+  }
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = html;
+  const linkedSourceKeys = sanitizeMarkdownAnchorsToSources(wrapper, sources);
+  return { html: wrapper.innerHTML, linkedSourceKeys };
 }
 
 function parseTimestamp(value) {
@@ -401,6 +369,7 @@ export function ChatApp() {
   const [releaseInfo, setReleaseInfo] = useState(null);
   const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
   const [sourceExpandedByMessage, setSourceExpandedByMessage] = useState({});
+  const [feedbackByMessage, setFeedbackByMessage] = useState({});
   const [profileOverride, setProfileOverride] = useState(
     () => window.localStorage.getItem("profileIp") || ""
   );
@@ -445,6 +414,7 @@ export function ChatApp() {
     const res = await apiFetch(`/chats/${chatId}/messages?limit=50`);
     const data = await res.json();
     setMessages(data.messages || []);
+    setFeedbackByMessage({});
     scrollToBottom(true);
   };
 
@@ -473,11 +443,34 @@ export function ChatApp() {
   }, [apiFetch]);
 
   const sendFeedback = async (messageId, rating) => {
-    await apiFetch("/feedback", {
+    const response = await apiFetch("/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message_id: messageId, rating }),
     });
+    if (!response.ok) {
+      throw new Error("Failed to record feedback");
+    }
+  };
+
+  const toggleFeedback = async (messageId, rating) => {
+    const current = Number(feedbackByMessage?.[messageId] || 0);
+    const next = current === rating ? 0 : rating;
+    setFeedbackByMessage((prev) => ({
+      ...prev,
+      [messageId]: next,
+    }));
+    if (next === 0) {
+      return;
+    }
+    try {
+      await sendFeedback(messageId, next);
+    } catch {
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [messageId]: current,
+      }));
+    }
   };
 
   const openDebugPage = (messageId) => {
@@ -1028,7 +1021,7 @@ export function ChatApp() {
                         {sources.map((source, idx) => (
                           <tr
                             key={`${source.extract_id || idx}-${idx}`}
-                            className={sourceIsProcedure(source) ? "bg-yellow-100/70" : ""}
+                            className={sourceIsProcedure(source) ? "bg-amber-100/35" : ""}
                           >
                             <td>{idx + 1}</td>
                             <td>{Number(source.score || 0).toFixed(4)}</td>
@@ -1284,6 +1277,14 @@ export function ChatApp() {
                       msg.question_created_at || msg.created_at || ""
                     );
                     const versionText = formatMessageVersion(msg.app_version || "");
+                    const selectedFeedback = Number(feedbackByMessage?.[msg.id] || 0);
+                    const upSelected = selectedFeedback === 1;
+                    const downSelected = selectedFeedback === -1;
+                    const renderedMarkdown = renderMarkdownWithSourceLinkBehavior(
+                      msg.content || "",
+                      msg.sources || []
+                    );
+                    const linkedSourceKeySet = new Set(renderedMarkdown.linkedSourceKeys || []);
                     return (
                       <div
                         key={msg.id}
@@ -1298,10 +1299,7 @@ export function ChatApp() {
                             <div
                               className="markdown"
                               dangerouslySetInnerHTML={{
-                                __html: renderMarkdownWithSourceLinkBehavior(
-                                  msg.content || "",
-                                  msg.sources || []
-                                ),
+                                __html: renderedMarkdown.html,
                               }}
                             />
                             {hasSources && (
@@ -1323,7 +1321,7 @@ export function ChatApp() {
                                   <ChevronRight className="size-3.5" aria-hidden="true" />
                                 )}
                                 <span>
-                                  Sources: {sourceInfo.sourceCount} | Asked: {askedAtText} | Version:{" "}
+                                  Sources: {sourceInfo.sourceCount} (procedures in amber) | Asked: {askedAtText} | Version:{" "}
                                   {versionText}
                                   {sourceInfo.overlapPrevCount !== null
                                     ? ` | Reused from previous answer: ${sourceInfo.overlapPrevCount}`
@@ -1341,12 +1339,18 @@ export function ChatApp() {
                                     rel="noreferrer"
                                     className={`badge gap-1 py-3 px-2 text-xs leading-tight ${
                                       sourceIsProcedure(source)
-                                        ? "bg-yellow-200 border-yellow-400 text-yellow-900"
+                                        ? "bg-amber-100/45 border-black/60 text-base-content"
                                         : "badge-outline"
                                     }`}
                                     title={sourceHoverTitle(source)}
                                   >
-                                    <span className="font-medium">{source.label}</span>
+                                    <span
+                                      className={`font-medium ${
+                                        linkedSourceKeySet.has(source.canonical_key) ? "underline" : ""
+                                      }`}
+                                    >
+                                      {source.label}
+                                    </span>
                                   </a>
                                 ))}
                               </div>
@@ -1362,18 +1366,20 @@ export function ChatApp() {
                                 Debug
                               </button>
                               <button
-                                className="btn btn-square btn-ghost"
-                                onClick={() => sendFeedback(msg.id, 1)}
+                                className={`btn btn-square btn-ghost ${upSelected ? "bg-success/15 text-success" : ""}`}
+                                onClick={() => toggleFeedback(msg.id, 1)}
                                 type="button"
+                                aria-pressed={upSelected}
                               >
-                                <ThumbsUp className="size-[1.2em]" />
+                                <ThumbsUp className={`size-[1.2em] ${upSelected ? "fill-current" : ""}`} />
                               </button>
                               <button
-                                className="btn btn-square btn-ghost"
-                                onClick={() => sendFeedback(msg.id, -1)}
+                                className={`btn btn-square btn-ghost ${downSelected ? "bg-error/15 text-error" : ""}`}
+                                onClick={() => toggleFeedback(msg.id, -1)}
                                 type="button"
+                                aria-pressed={downSelected}
                               >
-                                <ThumbsDown className="size-[1.2em]" />
+                                <ThumbsDown className={`size-[1.2em] ${downSelected ? "fill-current" : ""}`} />
                               </button>
                             </div>
                           </div>

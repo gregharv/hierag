@@ -56,7 +56,7 @@ FALLBACK_RETRY_MIN_MAX_EXTRACTS = 10
 FALLBACK_PREFIX_DECISION_CHARS = 48
 FALLBACK_CLARIFY_HISTORY_LIMIT = 8
 FALLBACK_LOOP_GUARD_HISTORY_WINDOW = 8
-PROCEDURE_LINKS_MAX = 1
+PROMPT_ALLOWED_SOURCE_LINKS_MAX = 6
 OFF_TOPIC_NO_SOURCES_REPLY = (
     "I could not find relevant Connections sources for that question. "
     "Ask about Connections policies, programs, or customer-service workflows."
@@ -244,13 +244,6 @@ def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[d
     return hydrated
 
 
-def _has_procedure_sources(sources: list[dict] | None) -> bool:
-    for source in sources or []:
-        if isinstance(source, dict) and _source_is_procedure_link_eligible(source):
-            return True
-    return False
-
-
 def _source_label_from_url(source: dict) -> str:
     raw_url = str(source.get("url") or source.get("url_canonical") or "").strip()
     if not raw_url:
@@ -276,15 +269,26 @@ def _source_label_from_url(source: dict) -> str:
     return (parsed.netloc or "procedure").strip() or "procedure"
 
 
-def _build_procedure_link_markdown(_answer_text: str, sources: list[dict] | None) -> str:
-    if not _has_procedure_sources(sources):
+def _strip_url_fragment(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
         return ""
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return value
+    return urlunsplit(parsed._replace(fragment="")) or value
+
+
+def _build_allowed_source_links_for_prompt(sources: list[dict] | None) -> list[dict[str, str]]:
     seen_urls: set[str] = set()
-    lines: list[str] = []
+    links: list[dict[str, str]] = []
     for source in sources or []:
         if not isinstance(source, dict):
             continue
-        if not _source_is_procedure_link_eligible(source):
+        if "source_score_eligible" in source and not bool(source.get("source_score_eligible")):
+            continue
+        if "source_score_eligible" not in source and not _source_passes_source_score_gate(source):
             continue
 
         base_url = str(source.get("url") or source.get("url_canonical") or "").strip()
@@ -297,32 +301,47 @@ def _build_procedure_link_markdown(_answer_text: str, sources: list[dict] | None
             continue
         seen_urls.add(canonical_key)
 
-        base_no_fragment = urlunsplit(urlsplit(base_url)._replace(fragment=""))
-        link_url = base_no_fragment or base_url
+        link_url = _strip_url_fragment(canonical or base_url)
+        if not link_url:
+            continue
         label = _source_label_from_url(source)
-        lines.append(f"- [{label}]({link_url})")
-        if len(lines) >= PROCEDURE_LINKS_MAX:
+        links.append({"label": label, "url": link_url})
+        if len(links) >= PROMPT_ALLOWED_SOURCE_LINKS_MAX:
             break
-
-    if not lines:
-        return ""
-    return "\n\nProcedure links:\n" + "\n".join(lines)
+    return links
 
 
-def _build_llm_prompt(query: str, context: str, *, procedure_mode: bool = False) -> tuple[str, str]:
-    if procedure_mode:
-        system_text = (
-            "Answer the question using only the provided context. "
-            "Keep it extremely brief: at most one short sentence or one short bullet. "
-            "Do not reproduce long procedures; rely on the Procedure links for step-by-step details. "
-            "If the answer is not in the context, say you don't know."
-        )
+def _build_llm_prompt(
+    query: str,
+    context: str,
+    *,
+    procedure_mode: bool = False,
+    sources: list[dict] | None = None,
+) -> tuple[str, str]:
+    _ = procedure_mode
+    system_text = (
+        "Answer the question using only the provided context. "
+        "If helpful, you may include markdown hyperlinks in the form [text](url), "
+        "but only with URLs listed under Allowed source links. "
+        "Do not include a separate links section. "
+        "If the answer is not in the context, say you don't know."
+    )
+    user_lines = [f"Question: {query}", "", "Context:", context]
+    allowed_links = _build_allowed_source_links_for_prompt(sources)
+    if allowed_links:
+        user_lines.extend(["", "Allowed source links:"])
+        for item in allowed_links:
+            user_lines.append(f"- {item['label']}: {item['url']}")
     else:
-        system_text = (
-            "Answer the question using only the provided context. "
-            "If the answer is not in the context, say you don't know."
-        )
-    user_text = f"Question: {query}\n\nContext:\n{context}"
+        user_lines.extend(["", "Allowed source links: none"])
+    user_lines.extend(
+        [
+            "",
+            "If a link is useful, use markdown [text](url) and only one of the allowed source URLs above.",
+            "Do not add a separate links section.",
+        ]
+    )
+    user_text = "\n".join(user_lines)
     return system_text, user_text
 
 
@@ -746,6 +765,31 @@ def _build_clarifying_question(
     return question or fallback
 
 
+def _fallback_retry_failure_reply(
+    *,
+    original_query: str,
+    effective_query: str,
+    history: list[dict] | None,
+    sources: list[dict] | None,
+    fallback_debug: dict,
+) -> str:
+    has_sources = any(
+        isinstance(item, dict) and str(item.get("url") or item.get("url_canonical") or "").strip()
+        for item in (sources or [])
+    )
+    if not has_sources:
+        fallback_debug["final_mode"] = "out_of_scope"
+        fallback_debug["answer_mode"] = "off_topic_no_sources"
+        return OFF_TOPIC_NO_SOURCES_REPLY
+    fallback_debug["final_mode"] = "clarify"
+    return _build_clarifying_question(
+        original_query=original_query,
+        effective_query=effective_query,
+        history=history,
+        sources=sources,
+    )
+
+
 def rewrite_query_with_history(query: str, history: list[dict] | None = None) -> tuple[str, dict]:
     original = str(query or "").strip()
     if not original:
@@ -943,9 +987,6 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         sources = _hydrate_sources_with_last_scraped(db, sources)
         yield {"type": "cache", "cache_id": cached.get("id")}
         text = str(cached.get("answer_text", "") or "")
-        procedure_links_block = _build_procedure_link_markdown(text, sources)
-        if procedure_links_block:
-            text = f"{text}{procedure_links_block}"
         for i in range(0, len(text), 80):
             yield {"type": "delta", "text": text[i : i + 80]}
         yield {
@@ -997,14 +1038,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
 
     client = None
 
-    def _run_stream_attempt(context_text: str, *, procedure_mode: bool) -> tuple[dict, dict]:
+    def _run_stream_attempt(context_text: str, *, sources: list[dict] | None) -> tuple[dict, dict]:
         nonlocal client
         if client is None:
             client = OpenAI(http_client=httpx.Client(verify=False))
         system_text_local, user_text_local = _build_llm_prompt(
             effective_query,
             context_text,
-            procedure_mode=procedure_mode,
+            sources=sources,
         )
         request_payload = {
             "model": LLM_MODEL,
@@ -1054,7 +1095,7 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         if second_pass["context"]:
             stream_attempt = _run_stream_attempt(
                 second_pass["context"],
-                procedure_mode=_has_procedure_sources(second_pass["sources"]),
+                sources=second_pass["sources"],
             )
             while True:
                 try:
@@ -1082,13 +1123,13 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                             history=history,
                         )
                 else:
-                    fallback_debug["final_mode"] = "clarify"
                     llm_request = None
-                    llm_response_text = _build_clarifying_question(
+                    llm_response_text = _fallback_retry_failure_reply(
                         original_query=original_query,
                         effective_query=effective_query,
                         history=history,
                         sources=second_pass["sources"],
+                        fallback_debug=fallback_debug,
                     )
                 yield {"type": "delta", "text": llm_response_text}
             else:
@@ -1105,18 +1146,18 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                     history=history,
                 )
             else:
-                fallback_debug["final_mode"] = "clarify"
-                llm_response_text = _build_clarifying_question(
+                llm_response_text = _fallback_retry_failure_reply(
                     original_query=original_query,
                     effective_query=effective_query,
                     history=history,
                     sources=second_pass["sources"],
+                    fallback_debug=fallback_debug,
                 )
             yield {"type": "delta", "text": llm_response_text}
     else:
         stream_attempt = _run_stream_attempt(
             first_pass["context"],
-            procedure_mode=_has_procedure_sources(first_pass["sources"]),
+            sources=first_pass["sources"],
         )
         while True:
             try:
@@ -1145,7 +1186,7 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
             if second_pass["context"]:
                 stream_attempt_retry = _run_stream_attempt(
                     second_pass["context"],
-                    procedure_mode=_has_procedure_sources(second_pass["sources"]),
+                    sources=second_pass["sources"],
                 )
                 while True:
                     try:
@@ -1173,13 +1214,13 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                                 history=history,
                             )
                     else:
-                        fallback_debug["final_mode"] = "clarify"
                         llm_request = None
-                        llm_response_text = _build_clarifying_question(
+                        llm_response_text = _fallback_retry_failure_reply(
                             original_query=original_query,
                             effective_query=effective_query,
                             history=history,
                             sources=second_pass["sources"],
+                            fallback_debug=fallback_debug,
                         )
                     yield {"type": "delta", "text": llm_response_text}
                 else:
@@ -1197,25 +1238,17 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                         history=history,
                     )
                 else:
-                    fallback_debug["final_mode"] = "clarify"
                     llm_request = None
-                    llm_response_text = _build_clarifying_question(
+                    llm_response_text = _fallback_retry_failure_reply(
                         original_query=original_query,
                         effective_query=effective_query,
                         history=history,
                         sources=second_pass["sources"],
+                        fallback_debug=fallback_debug,
                     )
                 yield {"type": "delta", "text": llm_response_text}
         elif fallback_debug["triggered"]:
             fallback_debug["answer_mode"] = "normal"
-
-    procedure_links_block = _build_procedure_link_markdown(
-        llm_response_text,
-        active_pass["sources"],
-    )
-    if procedure_links_block:
-        llm_response_text = f"{llm_response_text}{procedure_links_block}"
-        yield {"type": "delta", "text": procedure_links_block}
 
     print(f"timing: total {time.perf_counter() - t0:.3f}s")
     yield {
@@ -1270,8 +1303,16 @@ if __name__ == "__main__":
     )
     extract = test_db.t.extracts.insert(page_id=page["id"], extract_index=0, text="extract text")
     chunk = test_db.t.chunks.insert(extract_id=extract["id"], chunk_index=0, text="hello world")
-    assert _build_llm_prompt("q", "ctx")[0].startswith("Answer the question")
-    assert "Keep it extremely brief" in _build_llm_prompt("q", "ctx", procedure_mode=True)[0]
+    prompt_system, prompt_user = _build_llm_prompt(
+        "q",
+        "ctx",
+        procedure_mode=True,
+        sources=[{"url": "https://example.com/doc", "vector_score_raw": 0.9}],
+    )
+    assert prompt_system.startswith("Answer the question")
+    assert "Keep it extremely brief" not in prompt_system
+    assert "Allowed source links:" in prompt_user
+    assert "https://example.com/doc" in prompt_user
     assert _event_get({"type": "x"}, "type") == "x"
     assert _is_idk_like_response("I don't know based on the provided context.")
     assert not _is_idk_like_response("Here is what I found in the context.")
@@ -1284,7 +1325,17 @@ if __name__ == "__main__":
     )
     assert hydrated and hydrated[0]["last_scraped"] == "now"
     assert hydrated[0]["has_tab_steps"] is True
-    links_block = _build_procedure_link_markdown("Use this page.", hydrated)
-    assert "Procedure links:" in links_block
+    allowed_links = _build_allowed_source_links_for_prompt(hydrated)
+    assert allowed_links and allowed_links[0]["url"] == "https://example.com/doc"
+    fallback_debug = _fallback_debug_payload()
+    no_sources_reply = _fallback_retry_failure_reply(
+        original_query="q",
+        effective_query="q",
+        history=None,
+        sources=[],
+        fallback_debug=fallback_debug,
+    )
+    assert no_sources_reply == OFF_TOPIC_NO_SOURCES_REPLY
+    assert fallback_debug["final_mode"] == "out_of_scope"
     assert page["id"] and extract["id"] and chunk["id"]
     print("Check Passed")
