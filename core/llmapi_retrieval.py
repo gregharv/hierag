@@ -16,6 +16,10 @@ try:
         BM25_CANDIDATE_K,
         BM25_K1,
         FUSION_ALPHA,
+        MIN_BM25_SCORE_RAW,
+        MIN_VECTOR_SCORE_RAW,
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
         RETRIEVAL_DEBUG,
         SYNONYM_GROUPS,
         VECTOR_CANDIDATE_K,
@@ -28,6 +32,10 @@ except ImportError:
         BM25_CANDIDATE_K,
         BM25_K1,
         FUSION_ALPHA,
+        MIN_BM25_SCORE_RAW,
+        MIN_VECTOR_SCORE_RAW,
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
         RETRIEVAL_DEBUG,
         SYNONYM_GROUPS,
         VECTOR_CANDIDATE_K,
@@ -125,6 +133,19 @@ def extract_tab_step_anchors(html: str) -> list[str]:
     if not step_numbers:
         return []
     return [f"#tab-step{num}" for num in sorted(step_numbers)]
+
+
+def _coerce_float(value: object) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return 0.0
+
+
+def _source_passes_source_score_gate(source: dict) -> bool:
+    vector_raw = _coerce_float(source.get("vector_score_raw"))
+    bm25_raw = _coerce_float(source.get("bm25_score_raw"))
+    return (vector_raw > SOURCE_MIN_VECTOR_SCORE_RAW) or (bm25_raw > SOURCE_MIN_BM25_SCORE_RAW)
 
 
 def _is_missing_row_error(exc: Exception) -> bool:
@@ -271,6 +292,19 @@ def _bm25_scores(cache: Dict, query_terms: Sequence[str]) -> np.ndarray:
     return scores
 
 
+def _low_signal_gate(vector_scores: np.ndarray, bm25_scores: np.ndarray) -> dict:
+    vector_score_raw_max = float(vector_scores.max()) if vector_scores.size else 0.0
+    bm25_score_raw_max = float(bm25_scores.max()) if bm25_scores.size else 0.0
+    triggered = (vector_score_raw_max < MIN_VECTOR_SCORE_RAW) and (bm25_score_raw_max < MIN_BM25_SCORE_RAW)
+    return {
+        "triggered": bool(triggered),
+        "vector_score_raw_max": vector_score_raw_max,
+        "bm25_score_raw_max": bm25_score_raw_max,
+        "vector_score_raw_min": float(MIN_VECTOR_SCORE_RAW),
+        "bm25_score_raw_min": float(MIN_BM25_SCORE_RAW),
+    }
+
+
 def _search_embeddings_with_debug_once(db, query, top_k=5):
     """Hybrid retrieval pass with stale row skipping but no cache refresh retry."""
     t0 = time.perf_counter()
@@ -296,6 +330,7 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
     bm25_k = max(int(top_k), BM25_CANDIDATE_K)
     bm25_idx = _top_indices(bm25_scores, bm25_k)
     bm25_elapsed = time.perf_counter() - bm25_t0
+    low_signal_gate = _low_signal_gate(vector_scores, bm25_scores)
 
     fusion_t0 = time.perf_counter()
     if vector_idx.size == 0 and bm25_idx.size == 0:
@@ -304,6 +339,17 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
             {
                 "query": query,
                 "query_variants": query_variants,
+                "config": {
+                    "vector_candidate_k": VECTOR_CANDIDATE_K,
+                    "bm25_candidate_k": BM25_CANDIDATE_K,
+                    "fusion_alpha": FUSION_ALPHA,
+                    "bm25_k1": BM25_K1,
+                    "bm25_b": BM25_B,
+                    "min_vector_score_raw": MIN_VECTOR_SCORE_RAW,
+                    "min_bm25_score_raw": MIN_BM25_SCORE_RAW,
+                    "source_min_vector_score_raw": SOURCE_MIN_VECTOR_SCORE_RAW,
+                    "source_min_bm25_score_raw": SOURCE_MIN_BM25_SCORE_RAW,
+                },
                 "candidate_counts": {"vector": 0, "bm25": 0, "merged": 0},
                 "timings": {
                     "vector_s": vector_elapsed,
@@ -311,6 +357,7 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
                     "fusion_s": 0.0,
                     "total_s": time.perf_counter() - t0,
                 },
+                "low_signal_gate": low_signal_gate,
                 "ranked_chunks": [],
                 "by_chunk_id": {},
                 "stale_candidates_skipped": 0,
@@ -319,6 +366,49 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
         )
 
     candidate_idx = np.unique(np.concatenate([vector_idx, bm25_idx]))
+    if low_signal_gate["triggered"]:
+        fusion_elapsed = time.perf_counter() - fusion_t0
+        if RETRIEVAL_DEBUG:
+            print(
+                "hybrid_debug_low_signal: "
+                f"vector_raw_max={low_signal_gate['vector_score_raw_max']:.4f} "
+                f"bm25_raw_max={low_signal_gate['bm25_score_raw_max']:.4f}"
+            )
+        return (
+            [],
+            {
+                "query": query,
+                "query_variants": query_variants,
+                "config": {
+                    "vector_candidate_k": VECTOR_CANDIDATE_K,
+                    "bm25_candidate_k": BM25_CANDIDATE_K,
+                    "fusion_alpha": FUSION_ALPHA,
+                    "bm25_k1": BM25_K1,
+                    "bm25_b": BM25_B,
+                    "min_vector_score_raw": MIN_VECTOR_SCORE_RAW,
+                    "min_bm25_score_raw": MIN_BM25_SCORE_RAW,
+                    "source_min_vector_score_raw": SOURCE_MIN_VECTOR_SCORE_RAW,
+                    "source_min_bm25_score_raw": SOURCE_MIN_BM25_SCORE_RAW,
+                },
+                "candidate_counts": {
+                    "vector": int(vector_idx.size),
+                    "bm25": int(bm25_idx.size),
+                    "merged": int(candidate_idx.size),
+                },
+                "timings": {
+                    "vector_s": vector_elapsed,
+                    "bm25_s": bm25_elapsed,
+                    "fusion_s": fusion_elapsed,
+                    "total_s": time.perf_counter() - t0,
+                },
+                "low_signal_gate": low_signal_gate,
+                "ranked_chunks": [],
+                "by_chunk_id": {},
+                "stale_candidates_skipped": 0,
+            },
+            0,
+        )
+
     candidate_vector = vector_scores[candidate_idx]
     candidate_bm25 = bm25_scores[candidate_idx]
     vector_norm = _min_max_normalize(candidate_vector)
@@ -389,6 +479,10 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
             "fusion_alpha": FUSION_ALPHA,
             "bm25_k1": BM25_K1,
             "bm25_b": BM25_B,
+            "min_vector_score_raw": MIN_VECTOR_SCORE_RAW,
+            "min_bm25_score_raw": MIN_BM25_SCORE_RAW,
+            "source_min_vector_score_raw": SOURCE_MIN_VECTOR_SCORE_RAW,
+            "source_min_bm25_score_raw": SOURCE_MIN_BM25_SCORE_RAW,
         },
         "candidate_counts": {
             "vector": int(vector_idx.size),
@@ -401,6 +495,7 @@ def _search_embeddings_with_debug_once(db, query, top_k=5):
             "fusion_s": fusion_elapsed,
             "total_s": total_elapsed,
         },
+        "low_signal_gate": low_signal_gate,
         "ranked_chunks": ranked_chunks,
         "by_chunk_id": by_chunk_id,
         "stale_candidates_skipped": int(stale_candidates_skipped),
@@ -512,9 +607,6 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
             continue
         tab_step_anchors = extract_tab_step_anchors(page.get("html") or "")
 
-        seen_extract_ids.add(extract_id)
-        if url_canonical:
-            seen_urls.add(url_canonical)
         source = {
             "score": score,
             "chunk_id": chunk_id,
@@ -534,6 +626,14 @@ def build_source_links(db, scored_results, max_sources=3, score_details: Dict[in
                 source["bm25_score_raw"] = detail.get("bm25_score_raw")
                 source["vector_score_norm"] = detail.get("vector_score_norm")
                 source["bm25_score_norm"] = detail.get("bm25_score_norm")
+        source["source_score_eligible"] = _source_passes_source_score_gate(source)
+        source["procedure_link_eligible"] = bool(source["has_tab_steps"]) and bool(source["source_score_eligible"])
+        if not source["source_score_eligible"]:
+            continue
+
+        seen_extract_ids.add(extract_id)
+        if url_canonical:
+            seen_urls.add(url_canonical)
         sources.append(source)
 
         if max_sources is not None and len(sources) >= max_sources:
@@ -575,7 +675,19 @@ if __name__ == "__main__":
     assert canonicalize_source_url(encoded_url) == canonicalize_source_url(decoded_url)
     anchors = extract_tab_step_anchors('<a href="#tab-step2"></a><div id="tab-step1"></div>')
     assert anchors == ["#tab-step1", "#tab-step2"]
-    sources = build_source_links(test_db, [(0.9, chunk["id"])], max_sources=1)
+    sources = build_source_links(
+        test_db,
+        [(0.9, chunk["id"])],
+        max_sources=1,
+        score_details={
+            int(chunk["id"]): {
+                "from_vector": True,
+                "from_bm25": False,
+                "vector_score_raw": 0.9,
+                "bm25_score_raw": 0.0,
+            }
+        },
+    )
     assert len(sources) == 1 and sources[0]["url"] == "https://example.com/doc"
     assert sources[0]["url_canonical"] == "https://example.com/doc"
     assert sources[0]["last_scraped"] == "now"

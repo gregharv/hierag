@@ -12,6 +12,20 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.9
+
+- **Date (UTC):** 2026-03-04
+- **Changed:** Applied strict source emission gating to all sources using raw score thresholds (`v_raw > 0.65` or `b_raw > 10.0`), limited procedure links to the top eligible result, and added procedure-source highlighting in chat chips and debug source rows.
+- **Why it matters:** Off-topic and low-signal results no longer surface misleading sources, procedure links stay focused, and procedure content is easier to spot in the UI.
+- **Affected areas:** `core/llmapi_shared.py`, `core/llmapi_retrieval.py`, `core/llmapi_flow.py`, `interfaces/api/main.py`, `interfaces/client/src/components/ChatApp.tsx`, `interfaces/client/src/components/ChatApp.stories.tsx`, `core/tests/test_llmapi_retrieval.py`, `core/tests/test_llmapi_flow.py`
+
+## v0.1.8
+
+- **Date (UTC):** 2026-03-03
+- **Changed:** Added a low-signal retrieval gate using raw vector/BM25 score floors so off-topic prompts do not pass normalization into ranked results; updated fallback flow to classify these as out-of-scope, skip clarify/retry loops, and emit no sources.
+- **Why it matters:** Prevents unrelated questions from showing misleading Connections sources and reduces unnecessary follow-up clarification prompts when retrieval confidence is clearly too low.
+- **Affected areas:** `core/llmapi_shared.py`, `core/llmapi_retrieval.py`, `core/llmapi_flow.py`, `core/tests/test_llmapi_retrieval.py`, `core/tests/test_llmapi_flow.py`
+
 ## v0.1.7
 
 - **Date (UTC):** 2026-02-23

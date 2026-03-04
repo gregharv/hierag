@@ -33,19 +33,37 @@ function createMockFetch(mode = "default") {
     {
       url: "https://connections/?docs=residential%2Fbilling-payments-refunds%2Fpayment-arrangement-b%2Fbroken-payment-arrangement",
       last_scraped: "2026-01-27T15:37:14.208027",
+      has_tab_steps: true,
+      tab_step_count: 2,
+      vector_score_raw: 0.72,
+      bm25_score_raw: 5.2,
+      source_score_eligible: true,
+      procedure_link_eligible: true,
     },
     {
       url: "https://connections/?docs=residential/billing-payments-refunds/payment-arrangement-b/re-working-a-payment-arrangement",
       last_scraped: "2026-01-27T15:18:01.337120",
+      has_tab_steps: false,
+      tab_step_count: 0,
+      vector_score_raw: 0.69,
+      bm25_score_raw: 2.0,
+      source_score_eligible: true,
+      procedure_link_eligible: false,
     },
     {
       url: "https://connections/?docs=residential/billing-payments-refunds/payment-arrangement-b/broken-payment-arrangement",
       last_scraped: "2026-01-27T15:37:14.208027",
+      has_tab_steps: true,
+      tab_step_count: 1,
+      vector_score_raw: 0.67,
+      bm25_score_raw: 3.4,
+      source_score_eligible: true,
+      procedure_link_eligible: true,
     },
   ];
   const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
   const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
-  const storyVersion = "0.1.7";
+  const storyVersion = "0.1.9";
   const chatOneMessages =
     mode === "source-collapse"
       ? [
@@ -291,6 +309,10 @@ function createMockFetch(mode = "default") {
               bm25_score_raw: 8.4,
               url: "https://example.com/docs/hybrid-search",
               last_scraped: "2026-01-27T15:37:14.208027",
+              has_tab_steps: true,
+              tab_step_count: 2,
+              source_score_eligible: true,
+              procedure_link_eligible: true,
             },
           ],
           llm_request: {

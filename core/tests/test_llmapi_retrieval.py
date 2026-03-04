@@ -125,7 +125,7 @@ def test_build_source_links_dedupes_by_canonical_url_and_sets_url_canonical():
     score_details = {
         int(chunk_encoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.95},
         int(chunk_decoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.90},
-        int(chunk_other["id"]): {"from_vector": False, "from_bm25": True, "bm25_score_raw": 0.85},
+        int(chunk_other["id"]): {"from_vector": False, "from_bm25": True, "bm25_score_raw": 12.5},
     }
 
     sources = build_source_links(db, scored, max_sources=6, score_details=score_details)
@@ -134,8 +134,11 @@ def test_build_source_links_dedupes_by_canonical_url_and_sets_url_canonical():
     assert sources[1]["url_canonical"] == "https://connections/?docs=residential/traditional/topic"
     assert sources[0]["has_tab_steps"] is True
     assert sources[0]["tab_step_count"] == 2
+    assert sources[0]["procedure_link_eligible"] is True
     assert sources[1]["has_tab_steps"] is False
     assert sources[1]["tab_step_count"] == 0
+    assert sources[1]["procedure_link_eligible"] is False
+    assert float(sources[1]["bm25_score_raw"]) > 10.0
 
 
 def test_extract_tab_step_anchors_sorts_and_dedupes():
@@ -250,6 +253,72 @@ def test_search_embeddings_skips_persistent_stale_candidates_after_retry(monkeyp
     assert int(debug.get("stale_candidates_skipped_after_refresh") or 0) >= 1
 
 
+def test_search_embeddings_filters_low_signal_candidates(monkeypatch):
+    db, valid_chunk_id = _seed_db_with_single_chunk()
+    dim = 4
+    cache = {
+        "chunk_ids": np.array([valid_chunk_id], dtype=np.int64),
+        "chunk_texts": ["valid"],
+        "emb_matrix": np.array([[0.2, 0.2, 0.2, 0.2]], dtype=np.float32),
+        "doc_lens": np.array([1.0], dtype=np.float32),
+        "avg_doc_len": 1.0,
+        "doc_freq": {},
+        "term_postings": {},
+        "num_docs": 1,
+    }
+
+    monkeypatch.setattr(retrieval, "_get_retrieval_cache", lambda _db: cache)
+    monkeypatch.setattr(
+        retrieval,
+        "_query_embeddings",
+        lambda queries: np.zeros((len(queries), dim), dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        retrieval,
+        "_bm25_scores",
+        lambda cache, query_terms: np.zeros(int(cache["num_docs"]), dtype=np.float32),
+    )
+    monkeypatch.setattr(retrieval, "_expand_query_variants", lambda query: [query])
+    monkeypatch.setattr(retrieval, "MIN_VECTOR_SCORE_RAW", 0.10)
+    monkeypatch.setattr(retrieval, "MIN_BM25_SCORE_RAW", 0.10)
+
+    scored, debug = retrieval.search_embeddings_with_debug(db, "completely off topic", top_k=1)
+
+    assert scored == []
+    assert debug["ranked_chunks"] == []
+    assert debug["low_signal_gate"]["triggered"] is True
+    assert debug["low_signal_gate"]["vector_score_raw_max"] == 0.0
+    assert debug["low_signal_gate"]["bm25_score_raw_max"] == 0.0
+
+
+def test_build_source_links_filters_low_score_sources():
+    db, chunk_encoded, _chunk_decoded, _chunk_other = _seed_db_with_duplicate_urls()
+    scored = [(0.95, int(chunk_encoded["id"]))]
+    score_details = {
+        int(chunk_encoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.64, "bm25_score_raw": 9.9},
+    }
+
+    sources = build_source_links(db, scored, max_sources=3, score_details=score_details)
+    assert sources == []
+
+
+def test_build_source_links_dedupe_not_blocked_when_first_duplicate_fails_gate():
+    db, chunk_encoded, chunk_decoded, _chunk_other = _seed_db_with_duplicate_urls()
+    scored = [
+        (0.95, int(chunk_encoded["id"])),
+        (0.90, int(chunk_decoded["id"])),
+    ]
+    score_details = {
+        int(chunk_encoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.60, "bm25_score_raw": 0.0},
+        int(chunk_decoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.92, "bm25_score_raw": 0.0},
+    }
+
+    sources = build_source_links(db, scored, max_sources=3, score_details=score_details)
+    assert len(sources) == 1
+    assert sources[0]["chunk_id"] == int(chunk_decoded["id"])
+    assert sources[0]["url_canonical"] == "https://connections/?docs=residential/myway/topic"
+
+
 def test_parent_extracts_and_source_links_skip_missing_chunk_ids():
     db, chunk_encoded, _chunk_decoded, _chunk_other = _seed_db_with_duplicate_urls()
     missing_chunk_id = 999_999
@@ -257,9 +326,12 @@ def test_parent_extracts_and_source_links_skip_missing_chunk_ids():
         (0.98, missing_chunk_id),
         (0.95, int(chunk_encoded["id"])),
     ]
+    score_details = {
+        int(chunk_encoded["id"]): {"from_vector": True, "from_bm25": False, "vector_score_raw": 0.95, "bm25_score_raw": 0.0},
+    }
 
     extracts = get_parent_extracts(db, scored, max_extracts=3)
-    sources = build_source_links(db, scored, max_sources=3)
+    sources = build_source_links(db, scored, max_sources=3, score_details=score_details)
 
     assert len(extracts) == 1
     assert extracts[0]["chunk_id"] == int(chunk_encoded["id"])

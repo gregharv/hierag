@@ -20,7 +20,12 @@ try:
         get_parent_extracts,
         search_embeddings_with_debug,
     )
-    from .llmapi_shared import GLOSSARY_SNIPPETS, LLM_MODEL
+    from .llmapi_shared import (
+        GLOSSARY_SNIPPETS,
+        LLM_MODEL,
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
+    )
 except ImportError:
     from core import service as app_db
     from core.fastlite_db import ensure_pipeline_schema, get_scraper_db
@@ -32,7 +37,12 @@ except ImportError:
         get_parent_extracts,
         search_embeddings_with_debug,
     )
-    from core.llmapi_shared import GLOSSARY_SNIPPETS, LLM_MODEL
+    from core.llmapi_shared import (
+        GLOSSARY_SNIPPETS,
+        LLM_MODEL,
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
+    )
 
 QUERY_REWRITE_MODEL = "gpt-5-nano"
 QUERY_REWRITE_HISTORY_LIMIT = 20
@@ -46,7 +56,11 @@ FALLBACK_RETRY_MIN_MAX_EXTRACTS = 10
 FALLBACK_PREFIX_DECISION_CHARS = 48
 FALLBACK_CLARIFY_HISTORY_LIMIT = 8
 FALLBACK_LOOP_GUARD_HISTORY_WINDOW = 8
-PROCEDURE_LINKS_MAX = 3
+PROCEDURE_LINKS_MAX = 1
+OFF_TOPIC_NO_SOURCES_REPLY = (
+    "I could not find relevant Connections sources for that question. "
+    "Ask about Connections policies, programs, or customer-service workflows."
+)
 _IDK_PREFIX_RE = re.compile(
     r"^\s*(?:"
     r"i(?:\s+[a-z]+){0,3}\s+(?:do\s*not|don[\W_]*t)\s+know"
@@ -131,12 +145,34 @@ def _strip_idk_prefix(text: str) -> str:
     return stripped.strip()
 
 
+def _is_low_signal_retrieval(retrieval_summary: dict | None) -> bool:
+    if not isinstance(retrieval_summary, dict):
+        return False
+    gate = retrieval_summary.get("low_signal_gate")
+    return isinstance(gate, dict) and bool(gate.get("triggered"))
+
+
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return float(default)
+
+
 def _coerce_non_negative_int(value: object, default: int = 0) -> int:
     try:
         parsed = int(value)  # type: ignore[arg-type]
     except Exception:
         return default
     return parsed if parsed >= 0 else default
+
+
+def _source_passes_source_score_gate(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    vector_raw = _coerce_float(source.get("vector_score_raw"))
+    bm25_raw = _coerce_float(source.get("bm25_score_raw"))
+    return (vector_raw > SOURCE_MIN_VECTOR_SCORE_RAW) or (bm25_raw > SOURCE_MIN_BM25_SCORE_RAW)
 
 
 def _source_has_tab_step_fragment(source: dict | None) -> bool:
@@ -155,6 +191,14 @@ def _source_is_procedure(source: dict | None) -> bool:
     return bool(source.get("has_tab_steps")) or _source_has_tab_step_fragment(source)
 
 
+def _source_is_procedure_link_eligible(source: dict | None) -> bool:
+    if not _source_is_procedure(source):
+        return False
+    if isinstance(source, dict) and "procedure_link_eligible" in source:
+        return bool(source.get("procedure_link_eligible"))
+    return _source_passes_source_score_gate(source)
+
+
 def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[dict]:
     if not sources:
         return []
@@ -166,6 +210,9 @@ def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[d
             continue
 
         item = dict(source)
+        item["source_score_eligible"] = bool(_source_passes_source_score_gate(item))
+        if not item["source_score_eligible"]:
+            continue
         url = str(item.get("url") or item.get("url_canonical") or "").strip()
         if not url:
             hydrated.append(item)
@@ -191,6 +238,7 @@ def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[d
             tab_step_count = 1
         item["has_tab_steps"] = bool(has_tab_steps)
         item["tab_step_count"] = int(tab_step_count)
+        item["procedure_link_eligible"] = bool(_source_is_procedure(item)) and bool(item["source_score_eligible"])
         hydrated.append(item)
 
     return hydrated
@@ -198,7 +246,7 @@ def _hydrate_sources_with_last_scraped(db, sources: list[dict] | None) -> list[d
 
 def _has_procedure_sources(sources: list[dict] | None) -> bool:
     for source in sources or []:
-        if isinstance(source, dict) and _source_is_procedure(source):
+        if isinstance(source, dict) and _source_is_procedure_link_eligible(source):
             return True
     return False
 
@@ -236,7 +284,7 @@ def _build_procedure_link_markdown(_answer_text: str, sources: list[dict] | None
     for source in sources or []:
         if not isinstance(source, dict):
             continue
-        if not _source_is_procedure(source):
+        if not _source_is_procedure_link_eligible(source):
             continue
 
         base_url = str(source.get("url") or source.get("url_canonical") or "").strip()
@@ -945,10 +993,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
     llm_request = None
     llm_response_text = ""
     llm_guard_result = {"idk_prefix": False, "text": ""}
+    first_pass_low_signal = _is_low_signal_retrieval(first_pass["retrieval_summary"])
 
-    client = OpenAI(http_client=httpx.Client(verify=False))
+    client = None
 
     def _run_stream_attempt(context_text: str, *, procedure_mode: bool) -> tuple[dict, dict]:
+        nonlocal client
+        if client is None:
+            client = OpenAI(http_client=httpx.Client(verify=False))
         system_text_local, user_text_local = _build_llm_prompt(
             effective_query,
             context_text,
@@ -977,7 +1029,14 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
         print(f"timing: llm_stream_attempt {time.perf_counter() - t_llm:.3f}s")
         return request_payload, result
 
-    if not first_pass["context"]:
+    if not first_pass["context"] and first_pass_low_signal:
+        fallback_debug["triggered"] = True
+        fallback_debug["reason"] = "low_signal_off_topic"
+        fallback_debug["final_mode"] = "out_of_scope"
+        fallback_debug["answer_mode"] = "off_topic_no_sources"
+        llm_response_text = OFF_TOPIC_NO_SOURCES_REPLY
+        yield {"type": "delta", "text": llm_response_text}
+    elif not first_pass["context"]:
         fallback_debug["triggered"] = True
         fallback_debug["reason"] = "no_context"
         retry_config = _retry_retrieval_config(retrieval_top_k, max_extracts)
@@ -1219,7 +1278,10 @@ if __name__ == "__main__":
     retry_cfg = _retry_retrieval_config(40, 6)
     assert retry_cfg == {"top_k": 120, "max_extracts": 12}
     test_db.t.pages.update({"id": page["id"], "html": '<a href="#tab-step1">Step 1</a>'})
-    hydrated = _hydrate_sources_with_last_scraped(test_db, [{"url": "https://example.com/doc"}])
+    hydrated = _hydrate_sources_with_last_scraped(
+        test_db,
+        [{"url": "https://example.com/doc", "vector_score_raw": 0.9}],
+    )
     assert hydrated and hydrated[0]["last_scraped"] == "now"
     assert hydrated[0]["has_tab_steps"] is True
     links_block = _build_procedure_link_markdown("Use this page.", hydrated)

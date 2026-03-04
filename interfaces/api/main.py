@@ -25,6 +25,10 @@ try:
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.llmapi_retrieval import extract_tab_step_anchors
+    from core.llmapi_shared import (
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
+    )
     from core.release_info import get_release_info
 except ImportError:
     project_root = Path(__file__).resolve().parents[2]
@@ -34,6 +38,10 @@ except ImportError:
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.llmapi_retrieval import extract_tab_step_anchors
+    from core.llmapi_shared import (
+        SOURCE_MIN_BM25_SCORE_RAW,
+        SOURCE_MIN_VECTOR_SCORE_RAW,
+    )
     from core.release_info import get_release_info
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +108,21 @@ def _coerce_non_negative_int(value: object, default: int = 0) -> int:
     return parsed if parsed >= 0 else default
 
 
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return float(default)
+
+
+def _source_passes_source_score_gate(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    vector_raw = _coerce_float(source.get("vector_score_raw"))
+    bm25_raw = _coerce_float(source.get("bm25_score_raw"))
+    return (vector_raw > SOURCE_MIN_VECTOR_SCORE_RAW) or (bm25_raw > SOURCE_MIN_BM25_SCORE_RAW)
+
+
 def _source_has_tab_step_fragment(source: dict | None) -> bool:
     if not isinstance(source, dict):
         return False
@@ -117,7 +140,7 @@ def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
     try:
         db = _get_scraper_db()
     except Exception:
-        return sources
+        db = None
 
     hydrated: list[dict] = []
     cache: dict[str, dict | None] = {}
@@ -126,15 +149,18 @@ def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
             continue
 
         item = dict(source)
+        item["source_score_eligible"] = bool(_source_passes_source_score_gate(item))
+        if not item["source_score_eligible"]:
+            continue
         url = str(item.get("url") or item.get("url_canonical") or "").strip()
         if not url:
             hydrated.append(item)
             continue
 
-        if url not in cache:
+        if db is not None and url not in cache:
             row = list(db.t.pages.rows_where("url=?", [url], limit=1))
             cache[url] = row[0] if row else None
-        page_row = cache[url]
+        page_row = cache.get(url)
 
         has_tab_steps = bool(item.get("has_tab_steps")) or _source_has_tab_step_fragment(item)
         tab_step_count = _coerce_non_negative_int(item.get("tab_step_count"), default=0)
@@ -149,6 +175,7 @@ def _hydrate_sources_with_last_scraped(sources: list[dict]) -> list[dict]:
             tab_step_count = 1
         item["has_tab_steps"] = bool(has_tab_steps)
         item["tab_step_count"] = int(tab_step_count)
+        item["procedure_link_eligible"] = bool(has_tab_steps or _source_has_tab_step_fragment(item)) and bool(item["source_score_eligible"])
         hydrated.append(item)
 
     return hydrated

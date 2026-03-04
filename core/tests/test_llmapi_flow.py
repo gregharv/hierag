@@ -151,6 +151,11 @@ class _CaptureOpenAI:
         self.responses = _CaptureResponses()
 
 
+class _FailIfOpenAI:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("OpenAI should not be called for low-signal off-topic requests")
+
+
 def test_stream_dual_merge_prefers_original_signal_and_disables_glossary(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     chunk_ids = sorted(chunk_meta.keys())
@@ -345,6 +350,52 @@ def test_stream_no_context_retries_then_clarifies(monkeypatch):
     assert debug["fallback"]["second_pass_retrieval"]["ranked_chunks"] == []
 
 
+def test_stream_low_signal_off_topic_skips_retry_and_clarify(monkeypatch):
+    db, chunk_meta = _seed_flow_db()
+    search_calls = []
+
+    def fake_rewrite(query, history=None):
+        return query, {"used": False, "reason": "no_history"}
+
+    def fake_search(_db, query, top_k=5):
+        search_calls.append((query, int(top_k)))
+        debug = _make_debug_payload(query, [], chunk_meta)
+        debug["low_signal_gate"] = {
+            "triggered": True,
+            "vector_score_raw_max": 0.0,
+            "bm25_score_raw_max": 0.0,
+            "vector_score_raw_min": 0.55,
+            "bm25_score_raw_min": 0.05,
+        }
+        return [], debug
+
+    monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)
+    monkeypatch.setattr(flow, "search_embeddings_with_debug", fake_search)
+    monkeypatch.setattr(flow.app_db, "get_cache_answer", lambda _query: None)
+    monkeypatch.setattr(flow, "OpenAI", _FailIfOpenAI)
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: (_ for _ in ()).throw(AssertionError("clarifying question should not be generated")),
+    )
+
+    events = list(flow.stream_answer_with_context(db, "Tell me about NBA scores", top_k=10, max_extracts=2))
+    debug = next(event["debug"] for event in events if event.get("type") == "debug")
+    final_text = "".join(event.get("text", "") for event in events if event.get("type") == "delta")
+    source_event = next(event for event in events if event.get("type") == "sources")
+
+    assert len(search_calls) == 1
+    assert final_text == flow.OFF_TOPIC_NO_SOURCES_REPLY
+    assert source_event["sources"] == []
+    assert debug["sources"] == []
+    assert debug["fallback"]["triggered"] is True
+    assert debug["fallback"]["reason"] == "low_signal_off_topic"
+    assert debug["fallback"]["final_mode"] == "out_of_scope"
+    assert debug["fallback"]["answer_mode"] == "off_topic_no_sources"
+    assert debug["fallback"]["second_pass_retrieval"] is None
+    assert debug["llm_request"] is None
+
+
 def test_rewrite_excludes_prior_fallback_clarify_turns(monkeypatch):
     monkeypatch.setattr(flow, "OpenAI", _CaptureOpenAI)
     history = [
@@ -478,39 +529,56 @@ def test_loop_guard_uses_best_effort_when_second_pass_idk_has_no_salvage(monkeyp
     assert debug["fallback"]["answer_mode"] == "loop_guard_best_effort"
 
 
-def test_build_procedure_link_markdown_limits_to_three_and_dedupes():
+def test_build_procedure_link_markdown_limits_to_one_and_dedupes():
     sources = [
         {
             "url": "https://connections/?docs=residential%2Falpha",
             "url_canonical": "https://connections/?docs=residential/alpha",
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/alpha",
             "url_canonical": "https://connections/?docs=residential/alpha",
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/beta",
             "url_canonical": "https://connections/?docs=residential/beta",
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/gamma",
             "url_canonical": "https://connections/?docs=residential/gamma",
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         },
         {
             "url": "https://connections/?docs=residential/delta",
             "url_canonical": "https://connections/?docs=residential/delta",
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         },
     ]
     block = flow._build_procedure_link_markdown("Answer", sources)
     lines = [line for line in block.splitlines() if line.startswith("- [")]
-    assert len(lines) == 3
+    assert len(lines) == 1
     assert "#tab-step" not in block
-    assert "docs=residential/delta" not in block
+    assert "docs=residential/beta" not in block
+
+
+def test_hydrate_sources_drops_items_without_raw_scores():
+    db, _chunk_meta = _seed_flow_db()
+    chunk_id = sorted(_chunk_meta.keys())[0]
+    _set_tab_steps_for_chunk(db, chunk_id, steps=2)
+
+    hydrated = flow._hydrate_sources_with_last_scraped(
+        db,
+        [{"url": "https://connections/?docs=residential/alpha"}],
+    )
+    assert hydrated == []
 
 
 def test_build_procedure_link_markdown_recognizes_tab_step_fragment_without_metadata():
@@ -520,6 +588,7 @@ def test_build_procedure_link_markdown_recognizes_tab_step_fragment_without_meta
             "url_canonical": "https://connections/?docs=residential/alpha#tab-step2",
             "has_tab_steps": False,
             "tab_step_count": 0,
+            "vector_score_raw": 0.9,
         }
     ]
     block = flow._build_procedure_link_markdown("Answer", sources)
@@ -535,11 +604,26 @@ def test_build_procedure_link_markdown_appends_even_if_url_in_answer():
             "url": source_url,
             "url_canonical": source_url,
             "has_tab_steps": True,
+            "vector_score_raw": 0.9,
         }
     ]
     block = flow._build_procedure_link_markdown(f"See {source_url}", sources)
     assert "Procedure links:" in block
     assert f"({source_url})" in block
+
+
+def test_build_procedure_link_markdown_filters_low_score_sources():
+    sources = [
+        {
+            "url": "https://connections/?docs=residential/alpha",
+            "url_canonical": "https://connections/?docs=residential/alpha",
+            "has_tab_steps": True,
+            "vector_score_raw": 0.64,
+            "bm25_score_raw": 9.9,
+        }
+    ]
+    block = flow._build_procedure_link_markdown("Answer", sources)
+    assert block == ""
 
 
 def test_stream_cache_hit_appends_procedure_links_even_if_answer_contains_same_url(monkeypatch):
@@ -554,7 +638,7 @@ def test_stream_cache_hit_appends_procedure_links_even_if_answer_contains_same_u
         return {
             "id": 55,
             "answer_text": "Cached answer https://connections/?docs=residential/alpha",
-            "sources_json": '[{"url":"https://connections/?docs=residential/alpha"}]',
+            "sources_json": '[{"url":"https://connections/?docs=residential/alpha","vector_score_raw":0.9}]',
         }
 
     monkeypatch.setattr(flow, "rewrite_query_with_history", fake_rewrite)

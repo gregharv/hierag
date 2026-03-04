@@ -17,10 +17,12 @@ const STREAM_ERROR_FALLBACK_MESSAGE =
   "I hit a temporary problem generating a response. Please try again.";
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
-const PROCEDURE_LINKS_MAX = 3;
+const PROCEDURE_LINKS_MAX = 1;
 const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
   /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
 const TAB_STEP_FRAGMENT_RE = /#tab-step\d+\b/i;
+const LEGACY_SOURCE_MIN_V_RAW = 0.65;
+const LEGACY_SOURCE_MIN_B_RAW = 10.0;
 
 marked.setOptions({ breaks: true });
 
@@ -184,6 +186,7 @@ function normalizeMessageSources(sources) {
   const seen = new Set();
   for (const source of sources || []) {
     if (!source || typeof source !== "object") continue;
+    if (!sourceEligibleForDisplay(source)) continue;
     const key = canonicalSourceKey(source);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -205,6 +208,29 @@ function sourceIsProcedure(source) {
   return TAB_STEP_FRAGMENT_RE.test(url) || TAB_STEP_FRAGMENT_RE.test(canonical);
 }
 
+function sourceEligibleByRawScores(source) {
+  const vRaw = Number(source?.vector_score_raw);
+  const bRaw = Number(source?.bm25_score_raw);
+  if (!Number.isFinite(vRaw) && !Number.isFinite(bRaw)) return false;
+  return vRaw > LEGACY_SOURCE_MIN_V_RAW || bRaw > LEGACY_SOURCE_MIN_B_RAW;
+}
+
+function sourceEligibleForDisplay(source) {
+  if (!source || typeof source !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(source, "source_score_eligible")) {
+    return Boolean(source?.source_score_eligible);
+  }
+  return sourceEligibleByRawScores(source);
+}
+
+function sourceEligibleForProcedureLinks(source) {
+  if (!sourceIsProcedure(source)) return false;
+  if (Object.prototype.hasOwnProperty.call(source || {}, "procedure_link_eligible")) {
+    return Boolean(source?.procedure_link_eligible);
+  }
+  return sourceEligibleForDisplay(source);
+}
+
 function stripUrlFragment(rawUrl) {
   const value = String(rawUrl || "").trim();
   if (!value) return "";
@@ -220,7 +246,7 @@ function stripUrlFragment(rawUrl) {
 function buildProcedureLinksFromSources(sources) {
   const normalized = normalizeMessageSources(sources);
   const candidates = normalized.filter(
-    (source) => sourceIsProcedure(source) && String(source?.link || "").trim()
+    (source) => sourceEligibleForProcedureLinks(source) && String(source?.link || "").trim()
   );
   const links = [];
   for (const source of candidates) {
@@ -1000,7 +1026,10 @@ export function ChatApp() {
                       </thead>
                       <tbody>
                         {sources.map((source, idx) => (
-                          <tr key={`${source.extract_id || idx}-${idx}`}>
+                          <tr
+                            key={`${source.extract_id || idx}-${idx}`}
+                            className={sourceIsProcedure(source) ? "bg-yellow-100/70" : ""}
+                          >
                             <td>{idx + 1}</td>
                             <td>{Number(source.score || 0).toFixed(4)}</td>
                             <td>{source.from_vector ? "yes" : "no"}</td>
@@ -1310,7 +1339,11 @@ export function ChatApp() {
                                     href={source.link}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="badge badge-outline gap-1 py-3 px-2 text-xs leading-tight"
+                                    className={`badge gap-1 py-3 px-2 text-xs leading-tight ${
+                                      sourceIsProcedure(source)
+                                        ? "bg-yellow-200 border-yellow-400 text-yellow-900"
+                                        : "badge-outline"
+                                    }`}
                                     title={sourceHoverTitle(source)}
                                   >
                                     <span className="font-medium">{source.label}</span>
