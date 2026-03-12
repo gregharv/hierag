@@ -771,6 +771,8 @@ def _fallback_retry_failure_reply(
     effective_query: str,
     history: list[dict] | None,
     sources: list[dict] | None,
+    retrieval_summary: dict | None,
+    best_effort_context: str,
     fallback_debug: dict,
 ) -> str:
     has_sources = any(
@@ -781,12 +783,21 @@ def _fallback_retry_failure_reply(
         fallback_debug["final_mode"] = "out_of_scope"
         fallback_debug["answer_mode"] = "off_topic_no_sources"
         return OFF_TOPIC_NO_SOURCES_REPLY
-    fallback_debug["final_mode"] = "clarify"
-    return _build_clarifying_question(
-        original_query=original_query,
-        effective_query=effective_query,
+    if _is_low_signal_retrieval(retrieval_summary):
+        fallback_debug["final_mode"] = "clarify"
+        fallback_debug["answer_mode"] = "clarify_low_signal"
+        return _build_clarifying_question(
+            original_query=original_query,
+            effective_query=effective_query,
+            history=history,
+            sources=sources,
+        )
+    fallback_debug["final_mode"] = "answer"
+    fallback_debug["answer_mode"] = "best_effort_high_signal"
+    return _build_best_effort_answer(
+        query=effective_query,
+        context=best_effort_context,
         history=history,
-        sources=sources,
     )
 
 
@@ -1129,6 +1140,8 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                         effective_query=effective_query,
                         history=history,
                         sources=second_pass["sources"],
+                        retrieval_summary=second_pass["retrieval_summary"],
+                        best_effort_context=second_pass["context"],
                         fallback_debug=fallback_debug,
                     )
                 yield {"type": "delta", "text": llm_response_text}
@@ -1151,6 +1164,8 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                     effective_query=effective_query,
                     history=history,
                     sources=second_pass["sources"],
+                    retrieval_summary=second_pass["retrieval_summary"],
+                    best_effort_context=first_pass["context"] or "",
                     fallback_debug=fallback_debug,
                 )
             yield {"type": "delta", "text": llm_response_text}
@@ -1220,6 +1235,8 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                             effective_query=effective_query,
                             history=history,
                             sources=second_pass["sources"],
+                            retrieval_summary=second_pass["retrieval_summary"],
+                            best_effort_context=second_pass["context"],
                             fallback_debug=fallback_debug,
                         )
                     yield {"type": "delta", "text": llm_response_text}
@@ -1244,6 +1261,8 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
                         effective_query=effective_query,
                         history=history,
                         sources=second_pass["sources"],
+                        retrieval_summary=second_pass["retrieval_summary"],
+                        best_effort_context=first_pass["context"] or "",
                         fallback_debug=fallback_debug,
                     )
                 yield {"type": "delta", "text": llm_response_text}
@@ -1333,6 +1352,8 @@ if __name__ == "__main__":
         effective_query="q",
         history=None,
         sources=[],
+        retrieval_summary=None,
+        best_effort_context="",
         fallback_debug=fallback_debug,
     )
     assert no_sources_reply == OFF_TOPIC_NO_SOURCES_REPLY

@@ -35,6 +35,11 @@ def _read_version_from_pyproject(pyproject_path: Path = PYPROJECT_PATH) -> str:
     except (OSError, tomllib.TOMLDecodeError):
         return UNKNOWN_VERSION
 
+    project = payload.get("project", {})
+    version = str(project.get("version", "")).strip()
+    if version:
+        return version
+
     tool = payload.get("tool", {})
     poetry = tool.get("poetry", {})
     version = str(poetry.get("version", "")).strip()

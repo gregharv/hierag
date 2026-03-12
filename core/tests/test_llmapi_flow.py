@@ -272,7 +272,7 @@ def test_stream_idk_prefix_retries_retrieval_and_answers(monkeypatch):
     assert debug["sources"][0]["chunk_id"] == chunk_retry
 
 
-def test_stream_idk_prefix_retries_then_clarifies(monkeypatch):
+def test_stream_idk_prefix_retries_then_uses_best_effort_when_scores_are_not_low(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     chunk_id = sorted(chunk_meta.keys())[0]
     search_calls = []
@@ -291,7 +291,12 @@ def test_stream_idk_prefix_retries_then_clarifies(monkeypatch):
     monkeypatch.setattr(
         flow,
         "_build_clarifying_question",
-        lambda **_: "Can you clarify which program and customer type you mean?",
+        lambda **_: (_ for _ in ()).throw(AssertionError("clarifying question should not be generated")),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_build_best_effort_answer",
+        lambda query, context, history=None: "Best effort high-signal answer.",
     )
     _SequencedFakeOpenAI.stream_texts = [
         "I don't know from the provided context.",
@@ -305,11 +310,12 @@ def test_stream_idk_prefix_retries_then_clarifies(monkeypatch):
 
     assert len(search_calls) == 2
     assert search_calls[1][1] >= 120
-    assert final_text == "Can you clarify which program and customer type you mean?"
+    assert final_text == "Best effort high-signal answer."
     assert "don't know" not in final_text.lower()
     assert debug["fallback"]["triggered"] is True
     assert debug["fallback"]["reason"] == "retry_still_insufficient"
-    assert debug["fallback"]["final_mode"] == "clarify"
+    assert debug["fallback"]["final_mode"] == "answer"
+    assert debug["fallback"]["answer_mode"] == "best_effort_high_signal"
     assert debug["llm_request"] is None
 
 
@@ -349,6 +355,34 @@ def test_stream_no_context_retries_without_sources_returns_no_sources_reply(monk
     assert debug["fallback"]["retry_config"] == {"top_k": 120, "max_extracts": 10}
     assert debug["fallback"]["first_pass_retrieval"]["ranked_chunks"] == []
     assert debug["fallback"]["second_pass_retrieval"]["ranked_chunks"] == []
+
+
+def test_fallback_retry_failure_reply_low_signal_with_sources_clarifies(monkeypatch):
+    fallback_debug = flow._fallback_debug_payload()
+    monkeypatch.setattr(
+        flow,
+        "_build_best_effort_answer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("best effort should not be generated")),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_build_clarifying_question",
+        lambda **_: "Can you clarify which program and customer type you mean?",
+    )
+
+    reply = flow._fallback_retry_failure_reply(
+        original_query="Need workflow steps",
+        effective_query="Need workflow steps",
+        history=None,
+        sources=[{"url": "https://connections/?docs=residential/alpha"}],
+        retrieval_summary={"low_signal_gate": {"triggered": True}},
+        best_effort_context="",
+        fallback_debug=fallback_debug,
+    )
+
+    assert reply == "Can you clarify which program and customer type you mean?"
+    assert fallback_debug["final_mode"] == "clarify"
+    assert fallback_debug["answer_mode"] == "clarify_low_signal"
 
 
 def test_stream_low_signal_off_topic_skips_retry_and_clarify(monkeypatch):

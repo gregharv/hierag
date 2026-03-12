@@ -17,7 +17,7 @@ except ImportError:
     from core.fastlite_db import ensure_pipeline_schema, get_scraper_db
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
-LLM_MODEL = "gpt-5.2"
+LLM_MODEL = "gpt-5.4"
 VECTOR_CANDIDATE_K = 50
 BM25_CANDIDATE_K = 50
 FUSION_ALPHA = 0.70

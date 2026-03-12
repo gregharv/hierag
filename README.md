@@ -15,14 +15,14 @@ This repository follows a `core + interfaces` layout.
 ## API
 
 ```bash
-poetry install
-poetry run uvicorn interfaces.api.main:app --reload --port 8510
+uv sync
+uv run uvicorn interfaces.api.main:app --reload --port 8510
 ```
 
 Run tests:
 
 ```bash
-poetry run pytest interfaces/api/tests
+uv run pytest interfaces/api/tests
 ```
 
 ## Client
