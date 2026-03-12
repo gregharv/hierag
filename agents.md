@@ -64,17 +64,13 @@ When starting a frontend task, choose the simplest option that fits the requirem
 * *Use when:* Building internal tools, admin panels, or quick data visualizations.
 * *Stack:* Pure Python. Imports `core` directly.
 
-
 * **Option B: FastHTML (`interfaces/web`)**
 * *Use when:* Building a public multi-page website, a blog, or a standard CRUD app.
 * *Stack:* Python + HTMX. Imports `core` directly. Server-Side Rendering.
 
-
 * **Option C: Vite + React (`interfaces/client`)**
 * *Use when:* Building a highly interactive "app-like" experience (drag-and-drop, complex state).
 * *Stack:* TypeScript/React. REQUIRES `interfaces/api` (FastAPI) to talk to `core`.
-
-
 
 ### C. `/data` (The Persistence Layer)
 
@@ -83,8 +79,6 @@ When starting a frontend task, choose the simplest option that fits the requirem
 * **Multiple DBs:** The system is designed to handle multiple SQLite files.
 * **Naming:** `users.db`, `logs.db`, `jobs.db`.
 * **Connection:** `db = database("data/users.db")`
-
-
 
 ---
 
@@ -132,7 +126,6 @@ if __name__ == "__main__":
 * Install: `uv add <package>`
 * Run: `uv run <script>`
 
-
 * **Linting:** Use `ruff`. Run `uv run ruff check .` before finishing a task.
 * **Database:** Use `FastLite`.
 
@@ -150,3 +143,4 @@ if __name__ == "__main__":
 * **Start FastHTML:** `cd interfaces/web && uv run python main.py`
 * **Start React:** `cd interfaces/client && npm run dev`
 * **Start API:** `cd interfaces/api && uv run uvicorn main:app --reload`
+

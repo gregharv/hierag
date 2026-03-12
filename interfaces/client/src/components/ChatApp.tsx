@@ -112,6 +112,15 @@ function safeDecode(value) {
   }
 }
 
+function omitMapKey(map, key) {
+  if (!map || !Object.prototype.hasOwnProperty.call(map, key)) {
+    return map || {};
+  }
+  const next = { ...map };
+  delete next[key];
+  return next;
+}
+
 function canonicalSourceKey(source) {
   const raw = String(source?.url_canonical || source?.url || "").trim();
   if (!raw) return "";
@@ -370,6 +379,11 @@ export function ChatApp() {
   const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
   const [sourceExpandedByMessage, setSourceExpandedByMessage] = useState({});
   const [feedbackByMessage, setFeedbackByMessage] = useState({});
+  const [negativeFeedbackDraftByMessage, setNegativeFeedbackDraftByMessage] = useState({});
+  const [negativeFeedbackPendingByMessage, setNegativeFeedbackPendingByMessage] = useState({});
+  const [submittingNegativeByMessage, setSubmittingNegativeByMessage] = useState({});
+  const [negativeFeedbackErrorByMessage, setNegativeFeedbackErrorByMessage] = useState({});
+  const [activeNegativeFeedbackMessageId, setActiveNegativeFeedbackMessageId] = useState(null);
   const [profileOverride, setProfileOverride] = useState(
     () => window.localStorage.getItem("profileIp") || ""
   );
@@ -415,6 +429,11 @@ export function ChatApp() {
     const data = await res.json();
     setMessages(data.messages || []);
     setFeedbackByMessage({});
+    setNegativeFeedbackDraftByMessage({});
+    setNegativeFeedbackPendingByMessage({});
+    setSubmittingNegativeByMessage({});
+    setNegativeFeedbackErrorByMessage({});
+    setActiveNegativeFeedbackMessageId(null);
     scrollToBottom(true);
   };
 
@@ -442,27 +461,44 @@ export function ChatApp() {
     return chat.id;
   }, [apiFetch]);
 
-  const sendFeedback = async (messageId, rating) => {
+  const sendFeedback = async (messageId, rating, note = "") => {
     const response = await apiFetch("/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message_id: messageId, rating }),
+      body: JSON.stringify({ message_id: messageId, rating, note }),
     });
     if (!response.ok) {
       throw new Error("Failed to record feedback");
     }
   };
 
-  const toggleFeedback = async (messageId, rating) => {
+  const clearNegativeFeedbackState = (messageId, options = {}) => {
+    const { clearDraft = false, clearPending = true, clearError = true } = options;
+    setActiveNegativeFeedbackMessageId((prev) => (prev === messageId ? null : prev));
+    if (clearDraft) {
+      setNegativeFeedbackDraftByMessage((prev) => omitMapKey(prev, messageId));
+    }
+    if (clearPending) {
+      setNegativeFeedbackPendingByMessage((prev) => omitMapKey(prev, messageId));
+    }
+    if (clearError) {
+      setNegativeFeedbackErrorByMessage((prev) => omitMapKey(prev, messageId));
+    }
+    setSubmittingNegativeByMessage((prev) => omitMapKey(prev, messageId));
+  };
+
+  const submitPositiveFeedback = async (messageId) => {
     const current = Number(feedbackByMessage?.[messageId] || 0);
-    const next = current === rating ? 0 : rating;
+    const next = current === 1 ? 0 : 1;
     setFeedbackByMessage((prev) => ({
       ...prev,
       [messageId]: next,
     }));
     if (next === 0) {
+      clearNegativeFeedbackState(messageId, { clearDraft: true });
       return;
     }
+    clearNegativeFeedbackState(messageId, { clearDraft: true });
     try {
       await sendFeedback(messageId, next);
     } catch {
@@ -471,6 +507,90 @@ export function ChatApp() {
         [messageId]: current,
       }));
     }
+  };
+
+  const toggleNegativeFeedback = (messageId) => {
+    const current = Number(feedbackByMessage?.[messageId] || 0);
+    const isPending = Boolean(negativeFeedbackPendingByMessage?.[messageId]);
+    if (current === -1 && isPending) {
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [messageId]: 0,
+      }));
+      clearNegativeFeedbackState(messageId, { clearDraft: true });
+      return;
+    }
+    if (current === -1) {
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [messageId]: 0,
+      }));
+      clearNegativeFeedbackState(messageId, { clearDraft: true });
+      return;
+    }
+    if (activeNegativeFeedbackMessageId && activeNegativeFeedbackMessageId !== messageId) {
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [activeNegativeFeedbackMessageId]: 0,
+      }));
+      clearNegativeFeedbackState(activeNegativeFeedbackMessageId, { clearDraft: true });
+    }
+    setFeedbackByMessage((prev) => ({
+      ...prev,
+      [messageId]: -1,
+    }));
+    setNegativeFeedbackPendingByMessage((prev) => ({
+      ...prev,
+      [messageId]: true,
+    }));
+    setNegativeFeedbackDraftByMessage((prev) => ({
+      ...prev,
+      [messageId]: String(prev?.[messageId] || ""),
+    }));
+    setNegativeFeedbackErrorByMessage((prev) => omitMapKey(prev, messageId));
+    setActiveNegativeFeedbackMessageId(messageId);
+  };
+
+  const submitNegativeFeedback = async (messageId, note = "") => {
+    const current = Number(feedbackByMessage?.[messageId] || 0);
+    const trimmedNote = String(note || "").trim();
+    setSubmittingNegativeByMessage((prev) => ({
+      ...prev,
+      [messageId]: true,
+    }));
+    setNegativeFeedbackErrorByMessage((prev) => omitMapKey(prev, messageId));
+    try {
+      await sendFeedback(messageId, -1, trimmedNote);
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [messageId]: -1,
+      }));
+      clearNegativeFeedbackState(messageId, { clearDraft: true });
+    } catch {
+      setFeedbackByMessage((prev) => ({
+        ...prev,
+        [messageId]: current,
+      }));
+      setNegativeFeedbackPendingByMessage((prev) => ({
+        ...prev,
+        [messageId]: true,
+      }));
+      setNegativeFeedbackErrorByMessage((prev) => ({
+        ...prev,
+        [messageId]: "Could not record feedback. Please try again.",
+      }));
+      setActiveNegativeFeedbackMessageId(messageId);
+      setSubmittingNegativeByMessage((prev) => omitMapKey(prev, messageId));
+    }
+  };
+
+  const handleNegativeFeedbackSubmit = async (messageId) => {
+    const draft = String(negativeFeedbackDraftByMessage?.[messageId] || "");
+    await submitNegativeFeedback(messageId, draft);
+  };
+
+  const handleNegativeFeedbackSkip = async (messageId) => {
+    await submitNegativeFeedback(messageId, "");
   };
 
   const openDebugPage = (messageId) => {
@@ -1280,6 +1400,19 @@ export function ChatApp() {
                     const selectedFeedback = Number(feedbackByMessage?.[msg.id] || 0);
                     const upSelected = selectedFeedback === 1;
                     const downSelected = selectedFeedback === -1;
+                    const negativeFeedbackOpen = activeNegativeFeedbackMessageId === msg.id;
+                    const negativeFeedbackDraft = String(
+                      negativeFeedbackDraftByMessage?.[msg.id] || ""
+                    );
+                    const negativeFeedbackPending = Boolean(
+                      negativeFeedbackPendingByMessage?.[msg.id]
+                    );
+                    const negativeFeedbackSubmitting = Boolean(
+                      submittingNegativeByMessage?.[msg.id]
+                    );
+                    const negativeFeedbackError = String(
+                      negativeFeedbackErrorByMessage?.[msg.id] || ""
+                    );
                     const renderedMarkdown = renderMarkdownWithSourceLinkBehavior(
                       msg.content || "",
                       msg.sources || []
@@ -1367,21 +1500,65 @@ export function ChatApp() {
                               </button>
                               <button
                                 className={`btn btn-square btn-ghost ${upSelected ? "bg-success/15 text-success" : ""}`}
-                                onClick={() => toggleFeedback(msg.id, 1)}
+                                onClick={() => submitPositiveFeedback(msg.id)}
                                 type="button"
                                 aria-pressed={upSelected}
+                                aria-label="Mark response helpful"
                               >
                                 <ThumbsUp className={`size-[1.2em] ${upSelected ? "fill-current" : ""}`} />
                               </button>
                               <button
                                 className={`btn btn-square btn-ghost ${downSelected ? "bg-error/15 text-error" : ""}`}
-                                onClick={() => toggleFeedback(msg.id, -1)}
+                                onClick={() => toggleNegativeFeedback(msg.id)}
                                 type="button"
                                 aria-pressed={downSelected}
+                                aria-label="Mark response unhelpful"
                               >
                                 <ThumbsDown className={`size-[1.2em] ${downSelected ? "fill-current" : ""}`} />
                               </button>
                             </div>
+                            {negativeFeedbackOpen && negativeFeedbackPending ? (
+                              <div className="mt-3 rounded-box border border-base-300 bg-base-100 p-3">
+                                <label className="form-control gap-2">
+                                  <span className="label-text text-sm font-medium">
+                                    Tell us what went wrong
+                                  </span>
+                                  <textarea
+                                    className="textarea textarea-bordered min-h-24 w-full"
+                                    placeholder="Optional details about why this response was not helpful"
+                                    value={negativeFeedbackDraft}
+                                    onChange={(event) =>
+                                      setNegativeFeedbackDraftByMessage((prev) => ({
+                                        ...prev,
+                                        [msg.id]: event.target.value,
+                                      }))
+                                    }
+                                    disabled={negativeFeedbackSubmitting}
+                                  />
+                                </label>
+                                {negativeFeedbackError ? (
+                                  <p className="mt-2 text-sm text-error">{negativeFeedbackError}</p>
+                                ) : null}
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    className="btn btn-sm btn-error"
+                                    type="button"
+                                    onClick={() => handleNegativeFeedbackSubmit(msg.id)}
+                                    disabled={negativeFeedbackSubmitting}
+                                  >
+                                    {negativeFeedbackSubmitting ? "Submitting..." : "Submit"}
+                                  </button>
+                                  <button
+                                    className="btn btn-sm"
+                                    type="button"
+                                    onClick={() => handleNegativeFeedbackSkip(msg.id)}
+                                    disabled={negativeFeedbackSubmitting}
+                                  >
+                                    Skip
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         )}
                       </div>
@@ -1510,4 +1687,3 @@ export function ChatApp() {
 }
 
 export default ChatApp;
-

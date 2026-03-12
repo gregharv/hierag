@@ -387,6 +387,28 @@ function MockAppEnvironment({ children, mode = "default" }) {
   return children;
 }
 
+function AutoOpenNegativeFeedback({ children }) {
+  useEffect(() => {
+    let timeoutId = 0;
+
+    const openFeedback = () => {
+      const button = document.querySelector('button[aria-label="Mark response unhelpful"]');
+      if (!button) {
+        timeoutId = window.setTimeout(openFeedback, 50);
+        return;
+      }
+      button.click();
+    };
+
+    openFeedback();
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, []);
+
+  return children;
+}
+
 const meta: Meta<typeof ChatApp> = {
   title: "Components/ChatApp",
   component: ChatApp,
@@ -461,6 +483,22 @@ export const MarkdownSourceLinks: Story = {
       return (
         <MockAppEnvironment mode="markdown-links">
           <Story />
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const NegativeFeedbackInline: Story = {
+  name: "Negative Feedback Inline",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("default");
+      return (
+        <MockAppEnvironment mode="default">
+          <AutoOpenNegativeFeedback>
+            <Story />
+          </AutoOpenNegativeFeedback>
         </MockAppEnvironment>
       );
     },
