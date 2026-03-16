@@ -18,6 +18,8 @@ const STREAM_ERROR_FALLBACK_MESSAGE =
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 const INLINE_SOURCE_LINKS_MAX = 2;
+const SIDEBAR_CHAT_PREVIEW_MAX = 40;
+const SIDEBAR_CHAT_PREVIEW_WORD_BREAK_MIN = 24;
 const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
   /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
 const TAB_STEP_FRAGMENT_RE = /#tab-step\d+\b/i;
@@ -323,6 +325,21 @@ function formatMessageVersion(value) {
   const clean = value.trim();
   if (!clean) return "unknown";
   return clean.toLowerCase().startsWith("v") ? clean : `v${clean}`;
+}
+
+function formatSidebarChatPreview(value) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= SIDEBAR_CHAT_PREVIEW_MAX) {
+    return normalized;
+  }
+  const candidate = normalized.slice(0, SIDEBAR_CHAT_PREVIEW_MAX + 1);
+  const breakIndex = candidate.lastIndexOf(" ");
+  const clipped =
+    breakIndex >= SIDEBAR_CHAT_PREVIEW_WORD_BREAK_MIN
+      ? candidate.slice(0, breakIndex)
+      : normalized.slice(0, SIDEBAR_CHAT_PREVIEW_MAX);
+  return `${clipped.trimEnd()}\u2026`;
 }
 
 function sourceHoverTitle(source) {
@@ -1587,7 +1604,7 @@ export function ChatApp() {
 
       <div className="drawer-side is-drawer-close:overflow-visible">
         <label htmlFor="nav-drawer" aria-label="close sidebar" className="drawer-overlay"></label>
-        <div className="flex min-h-full flex-col items-start bg-base-200 is-drawer-close:w-14 is-drawer-open:w-96">
+        <div className="flex min-h-full max-w-[calc(100vw-1rem)] flex-col items-start bg-base-200 is-drawer-close:w-14 is-drawer-open:w-80">
           <div className="p-2 w-full">
             <div className="text-lg font-semibold is-drawer-open">Chats</div>
             <button
@@ -1614,6 +1631,7 @@ export function ChatApp() {
           <ul className="menu w-full grow">
             {visibleChats.map((chat) => {
               const title = chat.title || `Chat ${chat.id}`;
+              const sidebarPreview = formatSidebarChatPreview(title);
               const active = chat.id === activeChatId;
               return (
                 <li key={chat.id} className="group">
@@ -1624,7 +1642,7 @@ export function ChatApp() {
                       data-tip={title}
                       onClick={() => setActiveChatId(chat.id)}
                     >
-                      <span className="is-drawer-open truncate">{title}</span>
+                      <span className="is-drawer-open truncate">{sidebarPreview}</span>
                     </button>
                     <div className="dropdown dropdown-end is-drawer-open relative z-20">
                       <button
