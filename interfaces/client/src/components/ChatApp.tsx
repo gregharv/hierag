@@ -1455,9 +1455,6 @@ export function ChatApp() {
                     </span>
                   </div>
                 </div>
-                <div className="hidden text-sm font-medium sm:block">
-                  {profile.user_id || authUserId}
-                </div>
                 <button className="btn btn-ghost btn-sm" type="button" onClick={clearLoginState}>
                   Switch user
                 </button>
