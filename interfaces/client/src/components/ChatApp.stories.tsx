@@ -29,6 +29,7 @@ function toSseResponse(events) {
 }
 
 function createMockFetch(mode = "default") {
+  const adminMode = mode === "admin-stats" || mode === "admin-review";
   const defaultSources = [
     {
       url: "https://connections/?docs=residential%2Fbilling-payments-refunds%2Fpayment-arrangement-b%2Fbroken-payment-arrangement",
@@ -151,11 +152,82 @@ function createMockFetch(mode = "default") {
       { ip: "10.0.0.19", avatar: { initials: "B9", color: "#16a34a" } },
     ],
     profile: {
-      ip: "192.168.1.24",
+      user_id: adminMode ? "9999ZZ" : "1234AB",
       avatar: { initials: "H24", color: "#ea580c" },
+      is_admin: adminMode,
     },
     nextChatId: 3,
     nextMessageId: 3000,
+  };
+  const adminStatsPayload = {
+    summary: {
+      user_count: 3,
+      question_count: 12,
+      interaction_count: 12,
+      positive_feedback_count: 5,
+      negative_feedback_count: 3,
+      rated_interaction_count: 8,
+      unrated_interaction_count: 4,
+    },
+    users: [
+      {
+        user_id: "1111AA",
+        question_count: 6,
+        interaction_count: 6,
+        positive_feedback_count: 3,
+        negative_feedback_count: 1,
+        rated_interaction_count: 4,
+        unrated_interaction_count: 2,
+        last_interaction_at: "2026-02-25T14:20:00Z",
+      },
+      {
+        user_id: "2222BB",
+        question_count: 4,
+        interaction_count: 4,
+        positive_feedback_count: 1,
+        negative_feedback_count: 2,
+        rated_interaction_count: 3,
+        unrated_interaction_count: 1,
+        last_interaction_at: "2026-02-24T10:10:00Z",
+      },
+    ],
+    pagination: { page: 1, page_size: 25, total: 2, total_pages: 1 },
+  };
+  const adminInteractionsPayload = {
+    interactions: [
+      {
+        assistant_message_id: 1002,
+        chat_id: 1,
+        user_id: "1111AA",
+        asked_at: "2026-02-23T09:01:00Z",
+        question: "How can we improve retrieval quality?",
+        query_effective: "How can we improve retrieval quality with recent context?",
+        query_rewritten: "Improve retrieval quality using the recent pipeline discussion",
+        answer: assistantSeedContent,
+        rating: 1,
+        note: "This was helpful.",
+        source_count: seedAssistantSources.length,
+        has_debug: true,
+        sources: seedAssistantSources,
+      },
+      {
+        assistant_message_id: 1004,
+        chat_id: 1,
+        user_id: "2222BB",
+        asked_at: "2026-02-23T09:02:00Z",
+        question: "What should we do next for query rewrite and source quality?",
+        query_effective: "What should we do next for query rewrite and source quality?",
+        query_rewritten: "",
+        answer:
+          "Use dual retrieval pass analysis and monitor overlap per turn to confirm source freshness.",
+        rating: -1,
+        note: "Needed more concrete next steps.",
+        source_count: streamSources.length,
+        has_debug: true,
+        sources: streamSources,
+      },
+    ],
+    pagination: { page: 1, page_size: 25, total: 2, total_pages: 1 },
   };
 
   return async function mockFetch(input, init = {}) {
@@ -270,6 +342,37 @@ function createMockFetch(mode = "default") {
       return toJsonResponse({ ok: true }, 201);
     }
 
+    if (path === "/api/admin/stats/users" && method === "GET") {
+      if (!adminMode) {
+        return toJsonResponse({ detail: "Admin access required" }, 403);
+      }
+      return toJsonResponse(adminStatsPayload);
+    }
+
+    if (path === "/api/admin/interactions" && method === "GET") {
+      if (!adminMode) {
+        return toJsonResponse({ detail: "Admin access required" }, 403);
+      }
+      return toJsonResponse(adminInteractionsPayload);
+    }
+
+    const adminInteractionDetailMatch = path.match(/^\/api\/admin\/interactions\/(\d+)$/);
+    if (adminInteractionDetailMatch && method === "GET") {
+      if (!adminMode) {
+        return toJsonResponse({ detail: "Admin access required" }, 403);
+      }
+      const messageId = Number.parseInt(adminInteractionDetailMatch[1], 10);
+      const interaction =
+        adminInteractionsPayload.interactions.find((item) => item.assistant_message_id === messageId) ||
+        adminInteractionsPayload.interactions[0];
+      return toJsonResponse({
+        interaction: {
+          ...interaction,
+          debug_url: `/?debug_message_id=${interaction.assistant_message_id}`,
+        },
+      });
+    }
+
     const debugMatch = path.match(/^\/api\/messages\/(\d+)\/debug$/);
     if (debugMatch && method === "GET") {
       const messageId = Number.parseInt(debugMatch[1], 10);
@@ -364,8 +467,17 @@ function applyStoryUrl(mode) {
   const url = new URL(window.location.href);
   url.searchParams.delete("chat_id");
   url.searchParams.delete("debug_message_id");
+  url.searchParams.delete("view");
+  url.searchParams.delete("review_message_id");
   if (mode === "error") {
     url.searchParams.set("debug_message_id", "1002");
+  }
+  if (mode === "admin-stats") {
+    url.searchParams.set("view", "admin-stats");
+  }
+  if (mode === "admin-review") {
+    url.searchParams.set("view", "admin-review");
+    url.searchParams.set("review_message_id", "1002");
   }
   window.history.replaceState({}, "", url);
 }
@@ -499,6 +611,34 @@ export const NegativeFeedbackInline: Story = {
           <AutoOpenNegativeFeedback>
             <Story />
           </AutoOpenNegativeFeedback>
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const AdminStats: Story = {
+  name: "Admin Stats",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("admin-stats");
+      return (
+        <MockAppEnvironment mode="admin-stats">
+          <Story />
+        </MockAppEnvironment>
+      );
+    },
+  ],
+};
+
+export const AdminReview: Story = {
+  name: "Admin Review",
+  decorators: [
+    (Story) => {
+      applyStoryUrl("admin-review");
+      return (
+        <MockAppEnvironment mode="admin-review">
+          <Story />
         </MockAppEnvironment>
       );
     },

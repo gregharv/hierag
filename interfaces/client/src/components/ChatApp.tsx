@@ -60,6 +60,42 @@ function clearDebugParam() {
   window.history.pushState({}, "", url);
 }
 
+function parseViewMode() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = String(params.get("view") || "").trim().toLowerCase();
+  if (raw === "admin-stats" || raw === "admin-review") {
+    return raw;
+  }
+  return "chat";
+}
+
+function setViewParam(view) {
+  const url = new URL(window.location.href);
+  if (!view || view === "chat") {
+    url.searchParams.delete("view");
+  } else {
+    url.searchParams.set("view", view);
+  }
+  window.history.pushState({}, "", url);
+}
+
+function parseReviewMessageId() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get("review_message_id");
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function setReviewMessageParam(messageId) {
+  const url = new URL(window.location.href);
+  if (!messageId) {
+    url.searchParams.delete("review_message_id");
+  } else {
+    url.searchParams.set("review_message_id", String(messageId));
+  }
+  window.history.pushState({}, "", url);
+}
+
 function normalizeUserId(value) {
   const cleaned = String(value || "")
     .replace(/[^a-z0-9]/gi, "")
@@ -349,6 +385,43 @@ function formatSidebarChatPreview(value) {
   return `${clipped.trimEnd()}\u2026`;
 }
 
+function toDateTimeLocalValue(value) {
+  if (!value || typeof value !== "string") return "";
+  const parsed = parseTimestamp(value);
+  if (!parsed) return "";
+  const pad = (num) => String(num).padStart(2, "0");
+  return [
+    parsed.getFullYear(),
+    "-",
+    pad(parsed.getMonth() + 1),
+    "-",
+    pad(parsed.getDate()),
+    "T",
+    pad(parsed.getHours()),
+    ":",
+    pad(parsed.getMinutes()),
+  ].join("");
+}
+
+function formatRatingLabel(value) {
+  if (Number(value) === 1) return "Positive";
+  if (Number(value) === -1) return "Negative";
+  return "Unrated";
+}
+
+function ratingBadgeClass(value) {
+  if (Number(value) === 1) return "badge-success";
+  if (Number(value) === -1) return "badge-error";
+  return "badge-ghost";
+}
+
+function interactionAnswerExcerpt(value, max = 120) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1).trimEnd()}\u2026`;
+}
+
 function sourceHoverTitle(source) {
   const domain = domainFromUrl(source.link || source.url || source.url_canonical || "");
   const label = source.label || domain || source.link || source.url || source.url_canonical || "source";
@@ -386,11 +459,47 @@ export function ChatApp() {
   const guideHref = scoringGuideHref();
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(parseChatId());
+  const [viewMode, setViewMode] = useState(parseViewMode());
+  const [reviewMessageId, setReviewMessageId] = useState(parseReviewMessageId());
   const [debugMessageId, setDebugMessageId] = useState(parseDebugMessageId());
   const [debugState, setDebugState] = useState({
     loading: false,
     error: "",
     data: null,
+  });
+  const [adminStatsState, setAdminStatsState] = useState({
+    loading: false,
+    error: "",
+    data: null,
+  });
+  const [adminReviewState, setAdminReviewState] = useState({
+    loading: false,
+    error: "",
+    data: null,
+  });
+  const [adminDetailState, setAdminDetailState] = useState({
+    loading: false,
+    error: "",
+    data: null,
+  });
+  const [statsFilters, setStatsFilters] = useState({
+    range: "30d",
+    start: "",
+    end: "",
+    user_id_search: "",
+    sort: "last_interaction_at:desc",
+    page: 1,
+    page_size: 25,
+  });
+  const [reviewFilters, setReviewFilters] = useState({
+    range: "30d",
+    start: "",
+    end: "",
+    user_id: "",
+    rating: "all",
+    search: "",
+    page: 1,
+    page_size: 25,
   });
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -445,6 +554,48 @@ export function ChatApp() {
     return { normalized, data };
   }, []);
 
+  const openView = useCallback((nextView) => {
+    const normalized = nextView || "chat";
+    setViewMode(normalized);
+    setViewParam(normalized);
+    if (normalized !== "admin-review") {
+      setReviewMessageId(null);
+      setReviewMessageParam(null);
+    }
+  }, []);
+
+  const openReviewMessage = useCallback(
+    (messageId) => {
+      const parsed = Number(messageId);
+      if (!Number.isFinite(parsed)) return;
+      if (viewMode !== "admin-review") {
+        openView("admin-review");
+      }
+      setReviewMessageId(parsed);
+      setReviewMessageParam(parsed);
+    },
+    [openView, viewMode]
+  );
+
+  const closeReviewMessage = useCallback(() => {
+    setReviewMessageId(null);
+    setAdminDetailState({ loading: false, error: "", data: null });
+    setReviewMessageParam(null);
+  }, []);
+
+  const openReviewForUser = useCallback(
+    (userId) => {
+      setReviewFilters((prev) => ({
+        ...prev,
+        user_id: String(userId || ""),
+        page: 1,
+      }));
+      closeReviewMessage();
+      openView("admin-review");
+    },
+    [closeReviewMessage, openView]
+  );
+
   const scrollToBottom = (force = false) => {
     const el = listRef.current;
     if (!el) return;
@@ -487,6 +638,65 @@ export function ChatApp() {
     setActiveNegativeFeedbackMessageId(null);
     scrollToBottom(true);
   };
+
+  const loadAdminStats = useCallback(async () => {
+    const params = new URLSearchParams();
+    const nextFilters = statsFilters;
+    params.set("range", nextFilters.range);
+    if (nextFilters.start) params.set("start", nextFilters.start);
+    if (nextFilters.end) params.set("end", nextFilters.end);
+    if (nextFilters.user_id_search) params.set("user_id_search", nextFilters.user_id_search);
+    if (nextFilters.sort) params.set("sort", nextFilters.sort);
+    params.set("page", String(nextFilters.page || 1));
+    params.set("page_size", String(nextFilters.page_size || 25));
+
+    setAdminStatsState((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await apiFetch(`/admin/stats/users?${params.toString()}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to load admin stats");
+      }
+      const data = await res.json();
+      setAdminStatsState({ loading: false, error: "", data });
+    } catch (error) {
+      setAdminStatsState({
+        loading: false,
+        error: error?.message || "Failed to load admin stats",
+        data: null,
+      });
+    }
+  }, [apiFetch, statsFilters]);
+
+  const loadAdminReview = useCallback(async () => {
+    const params = new URLSearchParams();
+    const nextFilters = reviewFilters;
+    params.set("range", nextFilters.range);
+    if (nextFilters.start) params.set("start", nextFilters.start);
+    if (nextFilters.end) params.set("end", nextFilters.end);
+    if (nextFilters.user_id) params.set("user_id", nextFilters.user_id);
+    if (nextFilters.rating) params.set("rating", nextFilters.rating);
+    if (nextFilters.search) params.set("search", nextFilters.search);
+    params.set("page", String(nextFilters.page || 1));
+    params.set("page_size", String(nextFilters.page_size || 25));
+
+    setAdminReviewState((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await apiFetch(`/admin/interactions?${params.toString()}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to load interactions");
+      }
+      const data = await res.json();
+      setAdminReviewState({ loading: false, error: "", data });
+    } catch (error) {
+      setAdminReviewState({
+        loading: false,
+        error: error?.message || "Failed to load interactions",
+        data: null,
+      });
+    }
+  }, [apiFetch, reviewFilters]);
 
   const createChat = useCallback(async () => {
     const res = await apiFetch("/chats", {
@@ -896,10 +1106,21 @@ export function ChatApp() {
     if (!authUserId) {
       setChats([]);
       setMessages([]);
+      setViewMode("chat");
+      setReviewMessageId(null);
       return;
     }
     loadChats();
   }, [apiFetch, authUserId]);
+
+  useEffect(() => {
+    if (!profile?.is_admin && (viewMode === "admin-stats" || viewMode === "admin-review")) {
+      setViewMode("chat");
+      setViewParam("chat");
+      setReviewMessageId(null);
+      setReviewMessageParam(null);
+    }
+  }, [profile, viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -962,6 +1183,8 @@ export function ChatApp() {
   useEffect(() => {
     const onPopState = () => {
       setActiveChatId(parseChatId());
+      setViewMode(parseViewMode());
+      setReviewMessageId(parseReviewMessageId());
       setDebugMessageId(parseDebugMessageId());
     };
     window.addEventListener("popstate", onPopState);
@@ -1003,6 +1226,52 @@ export function ChatApp() {
     scrollToBottom(false);
   }, [messages]);
 
+  useEffect(() => {
+    if (!authUserId || !profile?.is_admin || viewMode !== "admin-stats") return;
+    loadAdminStats();
+  }, [authUserId, profile, viewMode, loadAdminStats]);
+
+  useEffect(() => {
+    if (!authUserId || !profile?.is_admin || viewMode !== "admin-review") return;
+    loadAdminReview();
+  }, [authUserId, profile, viewMode, loadAdminReview]);
+
+  useEffect(() => {
+    if (!authUserId || !profile?.is_admin || viewMode !== "admin-review" || !reviewMessageId) {
+      if (!reviewMessageId) {
+        setAdminDetailState({ loading: false, error: "", data: null });
+      }
+      return;
+    }
+    let cancelled = false;
+    const loadDetail = async () => {
+      setAdminDetailState({ loading: true, error: "", data: null });
+      try {
+        const res = await apiFetch(`/admin/interactions/${reviewMessageId}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || "Failed to load interaction detail");
+        }
+        const data = await res.json();
+        if (!cancelled) {
+          setAdminDetailState({ loading: false, error: "", data });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAdminDetailState({
+            loading: false,
+            error: error?.message || "Failed to load interaction detail",
+            data: null,
+          });
+        }
+      }
+    };
+    loadDetail();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, authUserId, profile, reviewMessageId, viewMode]);
+
   const clearLoginState = () => {
     window.localStorage.removeItem("userId");
     setAuthUserId("");
@@ -1010,9 +1279,16 @@ export function ChatApp() {
     setLoginError("");
     setProfile(null);
     setActiveChatId(null);
+    setViewMode("chat");
+    setReviewMessageId(null);
     setDebugMessageId(null);
     setMessages([]);
     setChats([]);
+    setAdminStatsState({ loading: false, error: "", data: null });
+    setAdminReviewState({ loading: false, error: "", data: null });
+    setAdminDetailState({ loading: false, error: "", data: null });
+    setViewParam("chat");
+    setReviewMessageParam(null);
     clearDebugParam();
   };
 
@@ -1067,10 +1343,10 @@ export function ChatApp() {
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const visibleChats = normalizedQuery
     ? chats.filter((chat) =>
-        (chat.title || `Chat ${chat.id}`)
-          .toLowerCase()
-          .includes(normalizedQuery)
-      )
+      (chat.title || `Chat ${chat.id}`)
+        .toLowerCase()
+        .includes(normalizedQuery)
+    )
     : chats;
 
   const assistantSourceMeta = {};
@@ -1098,6 +1374,79 @@ export function ChatApp() {
       latestAssistantWithSourcesId = message.id;
     }
   }
+  const canViewAdmin = Boolean(profile?.is_admin);
+
+  const renderPrimaryHeader = (title) => (
+    <nav className="navbar w-full bg-base-300">
+      <div className="px-4 text-xl font-semibold">{title}</div>
+      <div className="ml-auto flex items-center gap-2">
+        {canViewAdmin ? (
+          <>
+            <button
+              className={`btn btn-sm ${viewMode === "chat" ? "btn-primary" : "btn-ghost"}`}
+              type="button"
+              onClick={() => openView("chat")}
+            >
+              Chat
+            </button>
+            <button
+              className={`btn btn-sm ${viewMode === "admin-stats" ? "btn-primary" : "btn-ghost"}`}
+              type="button"
+              onClick={() => openView("admin-stats")}
+            >
+              Admin stats
+            </button>
+            <button
+              className={`btn btn-sm ${viewMode === "admin-review" ? "btn-primary" : "btn-ghost"}`}
+              type="button"
+              onClick={() => openView("admin-review")}
+            >
+              Interaction review
+            </button>
+          </>
+        ) : null}
+        {releaseInfo ? (
+          <a
+            className="btn btn-ghost btn-sm normal-case"
+            href={releaseInfo.changelogUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={releaseHoverTitle(releaseInfo)}
+          >
+            v{releaseInfo.version}
+          </a>
+        ) : null}
+        {!releaseInfo && releaseLoadFailed ? (
+          <a
+            className="btn btn-ghost btn-sm normal-case"
+            href={CHANGELOG_FALLBACK_HREF}
+            target="_blank"
+            rel="noreferrer"
+            title="View changelog"
+          >
+            Changelog
+          </a>
+        ) : null}
+        {profile && profile.avatar ? (
+          <div className="flex items-center gap-2">
+            <div className="avatar placeholder">
+              <div
+                className="h-9 min-w-16 rounded-full px-2 text-white flex items-center justify-center leading-none"
+                style={{ backgroundColor: profile.avatar.color }}
+              >
+                <span className="text-[10px] font-semibold tracking-tight">
+                  {profile.avatar.initials}
+                </span>
+              </div>
+            </div>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={clearLoginState}>
+              Switch user
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </nav>
+  );
 
   if (!authUserId) {
     return (
@@ -1157,6 +1506,528 @@ export function ChatApp() {
     );
   }
 
+  if (viewMode === "admin-stats" && canViewAdmin) {
+    const statsPayload = adminStatsState.data || {};
+    const statsSummary = statsPayload.summary || {};
+    const statsRows = statsPayload.users || [];
+    const statsPagination = statsPayload.pagination || {};
+
+    return (
+      <div className="min-h-screen bg-base-200">
+        {renderPrimaryHeader("Admin Stats")}
+        <div className="p-4 md:p-6">
+          <div className="mx-auto max-w-7xl space-y-4">
+            <div className="card bg-base-100 border border-base-300 shadow-sm">
+              <div className="card-body gap-4">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="form-control">
+                    <span className="label-text text-sm">Range</span>
+                    <select
+                      className="select select-bordered"
+                      value={statsFilters.range}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          range: event.target.value,
+                          page: 1,
+                        }))
+                      }
+                    >
+                      <option value="24h">24h</option>
+                      <option value="7d">7d</option>
+                      <option value="30d">30d</option>
+                      <option value="all">All</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">Start</span>
+                    <input
+                      className="input input-bordered"
+                      type="datetime-local"
+                      value={statsFilters.start}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          start: event.target.value,
+                          range: "custom",
+                          page: 1,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">End</span>
+                    <input
+                      className="input input-bordered"
+                      type="datetime-local"
+                      value={statsFilters.end}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          end: event.target.value,
+                          range: "custom",
+                          page: 1,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-control grow min-w-52">
+                    <span className="label-text text-sm">User 4+2</span>
+                    <input
+                      className="input input-bordered"
+                      type="text"
+                      value={statsFilters.user_id_search}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          user_id_search: normalizeUserId(event.target.value),
+                          page: 1,
+                        }))
+                      }
+                      placeholder="Filter by 4+2"
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">Sort</span>
+                    <select
+                      className="select select-bordered"
+                      value={statsFilters.sort}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          sort: event.target.value,
+                          page: 1,
+                        }))
+                      }
+                    >
+                      <option value="last_interaction_at:desc">Latest activity</option>
+                      <option value="question_count:desc">Most questions</option>
+                      <option value="positive_feedback_count:desc">Most positive</option>
+                      <option value="negative_feedback_count:desc">Most negative</option>
+                      <option value="user_id:asc">User A-Z</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Users</div><div className="text-2xl font-semibold">{statsSummary.user_count || 0}</div></div></div>
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Questions</div><div className="text-2xl font-semibold">{statsSummary.question_count || 0}</div></div></div>
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Interactions</div><div className="text-2xl font-semibold">{statsSummary.interaction_count || 0}</div></div></div>
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Positive</div><div className="text-2xl font-semibold text-success">{statsSummary.positive_feedback_count || 0}</div></div></div>
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Negative</div><div className="text-2xl font-semibold text-error">{statsSummary.negative_feedback_count || 0}</div></div></div>
+              <div className="card bg-base-100 border border-base-300 shadow-sm"><div className="card-body p-4"><div className="text-sm opacity-70">Unrated</div><div className="text-2xl font-semibold">{statsSummary.unrated_interaction_count || 0}</div></div></div>
+            </div>
+
+            {adminStatsState.loading ? (
+              <div className="alert"><span>Loading admin stats...</span></div>
+            ) : null}
+            {adminStatsState.error ? (
+              <div className="alert alert-error"><span>{adminStatsState.error}</span></div>
+            ) : null}
+
+            <div className="card bg-base-100 border border-base-300 shadow-sm">
+              <div className="card-body">
+                <div className="overflow-x-auto">
+                  <table className="table table-sm">
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Questions</th>
+                        <th>Positive</th>
+                        <th>Negative</th>
+                        <th>Rated</th>
+                        <th>Unrated</th>
+                        <th>Last interaction</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {statsRows.map((row) => (
+                        <tr key={row.user_id}>
+                          <td className="font-medium">{row.user_id}</td>
+                          <td>{row.question_count}</td>
+                          <td>{row.positive_feedback_count}</td>
+                          <td>{row.negative_feedback_count}</td>
+                          <td>{row.rated_interaction_count}</td>
+                          <td>{row.unrated_interaction_count}</td>
+                          <td>{formatMessageDateTime(row.last_interaction_at || "")}</td>
+                          <td>
+                            <button
+                              className="btn btn-sm"
+                              type="button"
+                              onClick={() => openReviewForUser(row.user_id)}
+                            >
+                              Review
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!adminStatsState.loading && statsRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="opacity-70">
+                            No users match the current filters.
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between gap-3 mt-3">
+                  <div className="text-sm opacity-70">
+                    Page {statsPagination.page || 1} of {statsPagination.total_pages || 1} | Total users:{" "}
+                    {statsPagination.total || 0}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      className="btn btn-sm"
+                      type="button"
+                      disabled={(statsPagination.page || 1) <= 1}
+                      onClick={() =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          page: Math.max(1, (prev.page || 1) - 1),
+                        }))
+                      }
+                    >
+                      Previous
+                    </button>
+                    <button
+                      className="btn btn-sm"
+                      type="button"
+                      disabled={(statsPagination.page || 1) >= (statsPagination.total_pages || 1)}
+                      onClick={() =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          page: (prev.page || 1) + 1,
+                        }))
+                      }
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (viewMode === "admin-review" && canViewAdmin) {
+    const reviewPayload = adminReviewState.data || {};
+    const reviewRows = reviewPayload.interactions || [];
+    const reviewPagination = reviewPayload.pagination || {};
+    const detail = adminDetailState.data?.interaction || null;
+
+    return (
+      <div className="min-h-screen bg-base-200">
+        {renderPrimaryHeader("Interaction Review")}
+        <div className="p-4 md:p-6">
+          <div className="mx-auto max-w-7xl space-y-4">
+            <div className="card bg-base-100 border border-base-300 shadow-sm">
+              <div className="card-body gap-4">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="form-control">
+                    <span className="label-text text-sm">Range</span>
+                    <select
+                      className="select select-bordered"
+                      value={reviewFilters.range}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          range: event.target.value,
+                          page: 1,
+                        }))
+                      }
+                    >
+                      <option value="24h">24h</option>
+                      <option value="7d">7d</option>
+                      <option value="30d">30d</option>
+                      <option value="all">All</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">Start</span>
+                    <input
+                      className="input input-bordered"
+                      type="datetime-local"
+                      value={reviewFilters.start}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          start: event.target.value,
+                          range: "custom",
+                          page: 1,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">End</span>
+                    <input
+                      className="input input-bordered"
+                      type="datetime-local"
+                      value={reviewFilters.end}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          end: event.target.value,
+                          range: "custom",
+                          page: 1,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">User 4+2</span>
+                    <input
+                      className="input input-bordered"
+                      type="text"
+                      value={reviewFilters.user_id}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          user_id: normalizeUserId(event.target.value),
+                          page: 1,
+                        }))
+                      }
+                      placeholder="Filter by 4+2"
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">Rating</span>
+                    <select
+                      className="select select-bordered"
+                      value={reviewFilters.rating}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          rating: event.target.value,
+                          page: 1,
+                        }))
+                      }
+                    >
+                      <option value="all">All</option>
+                      <option value="positive">Positive</option>
+                      <option value="negative">Negative</option>
+                      <option value="unrated">Unrated</option>
+                    </select>
+                  </label>
+                  <label className="form-control grow min-w-60">
+                    <span className="label-text text-sm">Search</span>
+                    <input
+                      className="input input-bordered"
+                      type="text"
+                      value={reviewFilters.search}
+                      onChange={(event) =>
+                        setReviewFilters((prev) => ({
+                          ...prev,
+                          search: event.target.value,
+                          page: 1,
+                        }))
+                      }
+                      placeholder="Search question, rewrite, answer, note, or source"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {adminReviewState.loading ? (
+              <div className="alert"><span>Loading interactions...</span></div>
+            ) : null}
+            {adminReviewState.error ? (
+              <div className="alert alert-error"><span>{adminReviewState.error}</span></div>
+            ) : null}
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(22rem,1fr)]">
+              <div className="card bg-base-100 border border-base-300 shadow-sm">
+                <div className="card-body">
+                  <div className="overflow-x-auto">
+                    <table className="table table-sm">
+                      <thead>
+                        <tr>
+                          <th>User</th>
+                          <th>Asked</th>
+                          <th>Question</th>
+                          <th>Answer</th>
+                          <th>Rating</th>
+                          <th>Sources</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reviewRows.map((row) => (
+                          <tr
+                            key={row.assistant_message_id}
+                            className={Number(reviewMessageId) === Number(row.assistant_message_id) ? "active" : ""}
+                          >
+                            <td>
+                              <button
+                                className="link link-hover font-medium"
+                                type="button"
+                                onClick={() => openReviewMessage(row.assistant_message_id)}
+                              >
+                                {row.user_id}
+                              </button>
+                            </td>
+                            <td>{formatMessageDateTime(row.asked_at || "")}</td>
+                            <td className="max-w-xs whitespace-normal">{row.question || "-"}</td>
+                            <td className="max-w-sm whitespace-normal">{interactionAnswerExcerpt(row.answer || "") || "-"}</td>
+                            <td>
+                              <span className={`badge ${ratingBadgeClass(row.rating)}`}>
+                                {formatRatingLabel(row.rating)}
+                              </span>
+                            </td>
+                            <td>{row.source_count || 0}</td>
+                          </tr>
+                        ))}
+                        {!adminReviewState.loading && reviewRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="opacity-70">
+                              No interactions match the current filters.
+                            </td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 mt-3">
+                    <div className="text-sm opacity-70">
+                      Page {reviewPagination.page || 1} of {reviewPagination.total_pages || 1} | Total interactions:{" "}
+                      {reviewPagination.total || 0}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        className="btn btn-sm"
+                        type="button"
+                        disabled={(reviewPagination.page || 1) <= 1}
+                        onClick={() =>
+                          setReviewFilters((prev) => ({
+                            ...prev,
+                            page: Math.max(1, (prev.page || 1) - 1),
+                          }))
+                        }
+                      >
+                        Previous
+                      </button>
+                      <button
+                        className="btn btn-sm"
+                        type="button"
+                        disabled={(reviewPagination.page || 1) >= (reviewPagination.total_pages || 1)}
+                        onClick={() =>
+                          setReviewFilters((prev) => ({
+                            ...prev,
+                            page: (prev.page || 1) + 1,
+                          }))
+                        }
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card bg-base-100 border border-base-300 shadow-sm">
+                <div className="card-body">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="card-title text-base">Interaction Detail</h2>
+                    {reviewMessageId ? (
+                      <button className="btn btn-ghost btn-sm" type="button" onClick={closeReviewMessage}>
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                  {adminDetailState.loading ? (
+                    <div className="alert"><span>Loading interaction detail...</span></div>
+                  ) : null}
+                  {adminDetailState.error ? (
+                    <div className="alert alert-error"><span>{adminDetailState.error}</span></div>
+                  ) : null}
+                  {!adminDetailState.loading && !adminDetailState.error && !detail ? (
+                    <p className="text-sm opacity-70">Select an interaction to inspect the question, rewrite, answer, sources, rating, and note.</p>
+                  ) : null}
+                  {!adminDetailState.loading && !adminDetailState.error && detail ? (
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="badge badge-outline">{detail.user_id}</span>
+                        <span className={`badge ${ratingBadgeClass(detail.rating)}`}>{formatRatingLabel(detail.rating)}</span>
+                        <span className="opacity-70">Asked {formatMessageDateTime(detail.asked_at || "")}</span>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-1">Question</div>
+                        <pre className="debug-pre">{detail.question || "-"}</pre>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-1">Effective Query</div>
+                        <pre className="debug-pre">{detail.query_effective || "-"}</pre>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-1">Rewritten Query</div>
+                        <pre className="debug-pre">{detail.query_rewritten || "-"}</pre>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-1">LLM Answer</div>
+                        <pre className="debug-pre">{detail.answer || "-"}</pre>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-1">Comment</div>
+                        <pre className="debug-pre">{detail.note || "-"}</pre>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium mb-2">Sources Used</div>
+                        <div className="flex flex-wrap gap-2">
+                          {(detail.sources || []).map((source, idx) => {
+                            const normalized = normalizeMessageSources([source])[0];
+                            if (!normalized) {
+                              return (
+                                <span key={`source-${idx}`} className="badge badge-outline">
+                                  {source.url || source.url_canonical || `Source ${idx + 1}`}
+                                </span>
+                              );
+                            }
+                            return (
+                              <a
+                                key={`${normalized.canonical_key}-${idx}`}
+                                href={normalized.link}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={`badge gap-1 py-3 px-2 text-xs leading-tight ${sourceIsProcedure(normalized)
+                                    ? "bg-amber-100/45 border-black/60 text-base-content"
+                                    : "badge-outline"
+                                  }`}
+                                title={sourceHoverTitle(normalized)}
+                              >
+                                <span className="font-medium">{normalized.label}</span>
+                              </a>
+                            );
+                          })}
+                          {(!detail.sources || detail.sources.length === 0) ? (
+                            <span className="text-sm opacity-70">No sources recorded.</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button className="btn btn-sm" type="button" onClick={() => openDebugPage(detail.assistant_message_id)}>
+                          Open debug
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (debugMessageId) {
     const debugPayload = debugState.data?.debug || {};
     const retrieval = debugPayload.retrieval || {};
@@ -1195,7 +2066,7 @@ export function ChatApp() {
                     How scoring works
                   </a>
                   <button className="btn btn-outline btn-sm" type="button" onClick={closeDebugPage}>
-                    Back to chat
+                    Back
                   </button>
                 </div>
               </div>
@@ -1421,6 +2292,16 @@ export function ChatApp() {
           </label>
           <div className="px-4 text-xl font-semibold">Chat</div>
           <div className="ml-auto flex items-center gap-2">
+            {canViewAdmin ? (
+              <>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => openView("admin-stats")}>
+                  Admin stats
+                </button>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => openView("admin-review")}>
+                  Interaction review
+                </button>
+              </>
+            ) : null}
             {releaseInfo ? (
               <a
                 className="btn btn-ghost btn-sm normal-case"
@@ -1567,17 +2448,15 @@ export function ChatApp() {
                                     href={source.link}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className={`badge gap-1 py-3 px-2 text-xs leading-tight ${
-                                      sourceIsProcedure(source)
+                                    className={`badge gap-1 py-3 px-2 text-xs leading-tight ${sourceIsProcedure(source)
                                         ? "bg-amber-100/45 border-black/60 text-base-content"
                                         : "badge-outline"
-                                    }`}
+                                      }`}
                                     title={sourceHoverTitle(source)}
                                   >
                                     <span
-                                      className={`font-medium ${
-                                        linkedSourceKeySet.has(source.canonical_key) ? "underline" : ""
-                                      }`}
+                                      className={`font-medium ${linkedSourceKeySet.has(source.canonical_key) ? "underline" : ""
+                                        }`}
                                     >
                                       {source.label}
                                     </span>

@@ -20,6 +20,63 @@ def auth_headers(user_id: str, ip: str | None = None, **extra: str) -> dict[str,
     return headers
 
 
+def seed_admin_interaction(
+    *,
+    login_code: str,
+    question: str,
+    answer: str,
+    query_effective: str | None = None,
+    query_rewritten: str | None = None,
+    feedback_ratings: list[tuple[int, str]] | None = None,
+    sources: list[dict] | None = None,
+) -> dict[str, int]:
+    import json
+    import core.service as service
+
+    user_id = service.get_or_create_user_by_login(login_code, "127.0.0.1")
+    chat_id = service.create_chat(user_id=user_id, title=f"{login_code} chat")
+    user_message_id = service.insert_message(
+        chat_id=chat_id,
+        role="user",
+        content=question,
+        question_norm=service.normalize_question(question),
+        app_version="0.1.10-test",
+    )
+    assistant_message_id = service.insert_message(
+        chat_id=chat_id,
+        role="assistant",
+        content=answer,
+        app_version="0.1.10-test",
+    )
+    debug_payload = {
+        "query": question,
+        "query_effective": query_effective or question,
+        "query_rewritten": query_rewritten,
+        "query_rewrite": {
+            "used": bool(query_rewritten),
+            "reason": "used" if query_rewritten else "no_history",
+            "model": "gpt-5-nano",
+            "history_turns": 0,
+        },
+        "sources": sources or [],
+        "llm_request": {"system_text": "system", "user_text": question},
+        "llm_response_text": answer,
+    }
+    service.update_message(
+        assistant_message_id,
+        debug_json=json.dumps(debug_payload, ensure_ascii=True),
+        sources_json=json.dumps(sources or [], ensure_ascii=True),
+    )
+    for rating, note in feedback_ratings or []:
+        service.insert_feedback(assistant_message_id, user_id, rating, note)
+    return {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "user_message_id": user_message_id,
+        "assistant_message_id": assistant_message_id,
+    }
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test_app.db"
@@ -564,3 +621,124 @@ def test_stream_exception_uses_friendly_message_and_persists(client: TestClient,
         item for item in messages_resp.json()["messages"] if int(item["id"]) == assistant_message_id
     )
     assert assistant_row["content"] == main._STREAM_ERROR_FALLBACK
+
+
+def test_profile_returns_is_admin_flag(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    admin_response = client.get("/api/profile", headers=auth_headers("9999ZZ", "9.9.9.9"))
+    assert admin_response.status_code == 200
+    assert admin_response.json()["is_admin"] is True
+
+    user_response = client.get("/api/profile", headers=auth_headers("1234AB", "1.1.1.1"))
+    assert user_response.status_code == 200
+    assert user_response.json()["is_admin"] is False
+
+
+def test_admin_endpoints_require_whitelist(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    response = client.get("/api/admin/stats/users", headers=auth_headers("1234AB", "1.2.3.4"))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
+def test_admin_stats_and_interaction_detail_use_latest_feedback(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    row_a = seed_admin_interaction(
+        login_code="1111AA",
+        question="How do I transfer service?",
+        answer="Transfer service answer",
+        query_effective="transfer service effective",
+        query_rewritten="how do i transfer active service",
+        feedback_ratings=[(-1, "wrong"), (1, "fixed")],
+        sources=[
+            {
+                "url": "https://connections/?docs=residential/transfer-service",
+                "vector_score_raw": 0.88,
+                "bm25_score_raw": 12.4,
+                "source_score_eligible": True,
+            }
+        ],
+    )
+    seed_admin_interaction(
+        login_code="2222BB",
+        question="How do I stop service?",
+        answer="Stop service answer",
+        feedback_ratings=[(-1, "missing step")],
+        sources=[
+            {
+                "url": "https://connections/?docs=residential/stop-service",
+                "vector_score_raw": 0.9,
+                "bm25_score_raw": 11.0,
+                "source_score_eligible": True,
+            }
+        ],
+    )
+
+    stats_response = client.get(
+        "/api/admin/stats/users?range=all&sort=user_id:asc",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert stats_response.status_code == 200
+    stats_payload = stats_response.json()
+    users = {item["user_id"]: item for item in stats_payload["users"]}
+    assert users["1111AA"]["question_count"] == 1
+    assert users["1111AA"]["positive_feedback_count"] == 1
+    assert users["1111AA"]["negative_feedback_count"] == 0
+    assert users["2222BB"]["negative_feedback_count"] == 1
+    assert stats_payload["summary"]["positive_feedback_count"] == 1
+    assert stats_payload["summary"]["negative_feedback_count"] == 1
+
+    interactions_response = client.get(
+        "/api/admin/interactions?range=all&rating=positive&user_id=1111AA",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert interactions_response.status_code == 200
+    interactions = interactions_response.json()["interactions"]
+    assert len(interactions) == 1
+    assert interactions[0]["assistant_message_id"] == row_a["assistant_message_id"]
+    assert interactions[0]["rating"] == 1
+    assert interactions[0]["query_rewritten"] == "how do i transfer active service"
+
+    detail_response = client.get(
+        f"/api/admin/interactions/{row_a['assistant_message_id']}",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["interaction"]
+    assert detail["question"] == "How do I transfer service?"
+    assert detail["answer"] == "Transfer service answer"
+    assert detail["query_effective"] == "transfer service effective"
+    assert detail["query_rewritten"] == "how do i transfer active service"
+    assert detail["rating"] == 1
+    assert detail["note"] == "fixed"
+    assert detail["sources"][0]["url"] == "https://connections/?docs=residential/transfer-service"
+
+
+def test_admin_interaction_filters_support_search_and_unrated(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    seed_admin_interaction(
+        login_code="3333CC",
+        question="How do I start service?",
+        answer="Start service answer",
+        query_effective="start service",
+    )
+    seed_admin_interaction(
+        login_code="4444DD",
+        question="What is MyWay?",
+        answer="MyWay answer",
+        feedback_ratings=[(-1, "not enough detail")],
+    )
+
+    unrated_response = client.get(
+        "/api/admin/interactions?range=all&rating=unrated&search=start",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert unrated_response.status_code == 200
+    unrated_items = unrated_response.json()["interactions"]
+    assert len(unrated_items) == 1
+    assert unrated_items[0]["user_id"] == "3333CC"
+    assert unrated_items[0]["rating"] == 0

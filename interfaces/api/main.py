@@ -11,6 +11,7 @@ import sys
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 import re
 
@@ -375,6 +376,47 @@ def _login_code(request: Request) -> str:
 
 def _user_id(request: Request) -> int:
     return service.get_or_create_user_by_login(_login_code(request), _client_ip(request))
+
+
+def _admin_login_codes() -> set[str]:
+    raw = os.getenv("HIERAG_ADMIN_LOGIN_CODES", "")
+    admins = set()
+    for item in raw.split(","):
+        normalized = _normalize_login_code(item)
+        if normalized:
+            admins.add(normalized)
+    return admins
+
+
+def _is_admin_login(login_code: str) -> bool:
+    return login_code in _admin_login_codes()
+
+
+def _require_admin(request: Request) -> tuple[str, int]:
+    login_code = _login_code(request)
+    user_id = service.get_or_create_user_by_login(login_code, _client_ip(request))
+    if not _is_admin_login(login_code):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return login_code, user_id
+
+
+def _normalize_admin_range(value: str | None) -> str:
+    normalized = str(value or "30d").strip().lower()
+    if normalized in {"24h", "7d", "30d", "all", "custom"}:
+        return normalized
+    raise HTTPException(status_code=400, detail="Invalid admin time range")
+
+
+def _validate_optional_datetime(value: str | None, label: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} datetime") from exc
+    return raw
 
 
 def _normalize_stream_error_message(value: object) -> str:
@@ -788,7 +830,7 @@ def profile(request: Request) -> dict[str, object]:
     user_id = _login_code(request)
     service.get_or_create_user_by_login(user_id, _client_ip(request))
     avatar = _avatar_from_user_id(user_id)
-    return {"user_id": user_id, "avatar": avatar}
+    return {"user_id": user_id, "avatar": avatar, "is_admin": _is_admin_login(user_id)}
 
 
 @api.get("/release")
@@ -1059,6 +1101,103 @@ def get_message_debug(message_id: int, request: Request) -> dict[str, object]:
         "chat_id": msg["chat_id"],
         "created_at": msg.get("created_at"),
         "debug": debug,
+    }
+
+
+@api.get("/admin/stats/users")
+def admin_user_stats(
+    request: Request,
+    range: str = "30d",
+    start: str | None = None,
+    end: str | None = None,
+    user_id_search: str | None = None,
+    sort: str = "last_interaction_at:desc",
+    page: int = 1,
+    page_size: int = 25,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    time_range = _normalize_admin_range(range)
+    start_value = _validate_optional_datetime(start, "start")
+    end_value = _validate_optional_datetime(end, "end")
+    payload = service.list_admin_user_stats(
+        range_name=time_range,
+        start=start_value,
+        end=end_value,
+        user_id_search=user_id_search,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "summary": payload["summary"],
+        "users": payload["items"],
+        "pagination": payload["pagination"],
+        "filters": {
+            "range": time_range,
+            "start": start_value,
+            "end": end_value,
+            "user_id_search": str(user_id_search or "").strip(),
+            "sort": sort,
+        },
+        "admin_user_id": admin_login,
+    }
+
+
+@api.get("/admin/interactions")
+def admin_interactions(
+    request: Request,
+    range: str = "30d",
+    start: str | None = None,
+    end: str | None = None,
+    user_id: str | None = None,
+    rating: str | None = None,
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    time_range = _normalize_admin_range(range)
+    start_value = _validate_optional_datetime(start, "start")
+    end_value = _validate_optional_datetime(end, "end")
+    payload = service.list_admin_interactions(
+        range_name=time_range,
+        start=start_value,
+        end=end_value,
+        user_id=user_id,
+        rating=rating,
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "interactions": payload["items"],
+        "pagination": payload["pagination"],
+        "filters": {
+            "range": time_range,
+            "start": start_value,
+            "end": end_value,
+            "user_id": str(user_id or "").strip(),
+            "rating": str(rating or "").strip() or "all",
+            "search": str(search or "").strip(),
+        },
+        "admin_user_id": admin_login,
+    }
+
+
+@api.get("/admin/interactions/{message_id}")
+def admin_interaction_detail(message_id: int, request: Request) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    row = service.get_admin_interaction(message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Interaction not found")
+    sources = _hydrate_sources_with_last_scraped(list(row.get("sources") or []))
+    return {
+        "interaction": {
+            **row,
+            "sources": sources,
+            "debug_url": f"/?debug_message_id={message_id}",
+        },
+        "admin_user_id": admin_login,
     }
 
 
