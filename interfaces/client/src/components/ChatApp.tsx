@@ -60,6 +60,13 @@ function clearDebugParam() {
   window.history.pushState({}, "", url);
 }
 
+function normalizeUserId(value) {
+  const cleaned = String(value || "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase();
+  return cleaned.slice(0, 6);
+}
+
 function MenuIcon() {
   return (
     <svg
@@ -391,7 +398,16 @@ export function ChatApp() {
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [profile, setProfile] = useState(null);
-  const [profiles, setProfiles] = useState([]);
+  const [authUserId, setAuthUserId] = useState(
+    () => normalizeUserId(window.localStorage.getItem("userId") || "")
+  );
+  const [loginInput, setLoginInput] = useState(
+    () => normalizeUserId(window.localStorage.getItem("userId") || "")
+  );
+  const [loginError, setLoginError] = useState("");
+  const [authChecking, setAuthChecking] = useState(
+    () => Boolean(normalizeUserId(window.localStorage.getItem("userId") || ""))
+  );
   const [releaseInfo, setReleaseInfo] = useState(null);
   const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
   const [sourceExpandedByMessage, setSourceExpandedByMessage] = useState({});
@@ -401,25 +417,33 @@ export function ChatApp() {
   const [submittingNegativeByMessage, setSubmittingNegativeByMessage] = useState({});
   const [negativeFeedbackErrorByMessage, setNegativeFeedbackErrorByMessage] = useState({});
   const [activeNegativeFeedbackMessageId, setActiveNegativeFeedbackMessageId] = useState(null);
-  const [profileOverride, setProfileOverride] = useState(
-    () => window.localStorage.getItem("profileIp") || ""
-  );
   const [deleteTarget, setDeleteTarget] = useState(null);
   const listRef = useRef(null);
   const searchRef = useRef(null);
   const inputRef = useRef(null);
-  const profileDropdownRef = useRef(null);
 
   const apiFetch = useCallback(
     (path, options = {}) => {
       const headers = new Headers(options.headers || {});
-      if (profileOverride) {
-        headers.set("X-Profile-IP", profileOverride);
+      if (authUserId) {
+        headers.set("X-User-ID", authUserId);
       }
       return fetch(`${API_BASE}${path}`, { ...options, headers });
     },
-    [profileOverride]
+    [authUserId]
   );
+
+  const fetchProfileForUser = useCallback(async (candidate) => {
+    const normalized = normalizeUserId(candidate);
+    const headers = new Headers({ "X-User-ID": normalized });
+    const response = await fetch(`${API_BASE}/profile`, { headers });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "Sign-in failed");
+    }
+    const data = await response.json();
+    return { normalized, data };
+  }, []);
 
   const scrollToBottom = (force = false) => {
     const el = listRef.current;
@@ -431,7 +455,14 @@ export function ChatApp() {
   };
 
   const loadChats = async () => {
+    if (!authUserId) {
+      setChats([]);
+      return;
+    }
     const res = await apiFetch("/chats");
+    if (!res.ok) {
+      return;
+    }
     const data = await res.json();
     const items = data.chats || [];
     setChats(items);
@@ -441,8 +472,11 @@ export function ChatApp() {
   };
 
   const loadMessages = async (chatId) => {
-    if (!chatId) return;
+    if (!chatId || !authUserId) return;
     const res = await apiFetch(`/chats/${chatId}/messages?limit=50`);
+    if (!res.ok) {
+      return;
+    }
     const data = await res.json();
     setMessages(data.messages || []);
     setFeedbackByMessage({});
@@ -820,23 +854,52 @@ export function ChatApp() {
   };
 
   useEffect(() => {
-    loadChats();
-  }, [apiFetch]);
+    let cancelled = false;
+
+    const restoreAuth = async () => {
+      if (!authUserId) {
+        setAuthChecking(false);
+        setProfile(null);
+        return;
+      }
+
+      setAuthChecking(true);
+      try {
+        const { normalized, data } = await fetchProfileForUser(authUserId);
+        if (cancelled) return;
+        window.localStorage.setItem("userId", normalized);
+        setAuthUserId(normalized);
+        setLoginInput(normalized);
+        setLoginError("");
+        setProfile(data);
+      } catch (error) {
+        if (cancelled) return;
+        window.localStorage.removeItem("userId");
+        setAuthUserId("");
+        setLoginInput("");
+        setProfile(null);
+        setLoginError(error?.message || "Sign-in failed");
+      } finally {
+        if (!cancelled) {
+          setAuthChecking(false);
+        }
+      }
+    };
+
+    restoreAuth();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchProfileForUser]);
 
   useEffect(() => {
-    const loadProfile = async () => {
-      const res = await apiFetch("/profile");
-      const data = await res.json();
-      setProfile(data);
-    };
-    const loadProfiles = async () => {
-      const res = await apiFetch("/profiles");
-      const data = await res.json();
-      setProfiles(data.profiles || []);
-    };
-    loadProfile();
-    loadProfiles();
-  }, [apiFetch]);
+    if (!authUserId) {
+      setChats([]);
+      setMessages([]);
+      return;
+    }
+    loadChats();
+  }, [apiFetch, authUserId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -886,11 +949,11 @@ export function ChatApp() {
   }, []);
 
   useEffect(() => {
-    if (activeChatId) {
+    if (authUserId && activeChatId) {
       setChatParam(activeChatId);
       loadMessages(activeChatId);
     }
-  }, [activeChatId]);
+  }, [activeChatId, authUserId]);
 
   useEffect(() => {
     setSourceExpandedByMessage({});
@@ -940,37 +1003,44 @@ export function ChatApp() {
     scrollToBottom(false);
   }, [messages]);
 
-  const selectProfile = (ip) => {
-    const next = ip || "";
-    if (next) {
-      window.localStorage.setItem("profileIp", next);
-    } else {
-      window.localStorage.removeItem("profileIp");
-    }
-    setProfileOverride(next);
+  const clearLoginState = () => {
+    window.localStorage.removeItem("userId");
+    setAuthUserId("");
+    setLoginInput("");
+    setLoginError("");
+    setProfile(null);
     setActiveChatId(null);
+    setDebugMessageId(null);
     setMessages([]);
+    setChats([]);
+    clearDebugParam();
   };
 
-  const addProfile = async () => {
-    const ip = window.prompt("Enter IP address");
-    if (!ip) return;
-    const res = await apiFetch("/profiles", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ip }),
-    });
-    if (res.ok) {
-      const data = await apiFetch("/profiles");
-      const list = await data.json();
-      setProfiles(list.profiles || []);
-      selectProfile(ip);
+  const handleLoginSubmit = async (event) => {
+    event.preventDefault();
+    const normalized = normalizeUserId(loginInput);
+    if (normalized.length !== 6) {
+      setLoginError("Enter your 4+2 as 6 letters and numbers.");
+      return;
     }
-  };
 
-  const closeProfileDropdown = () => {
-    if (profileDropdownRef.current) {
-      profileDropdownRef.current.blur();
+    setAuthChecking(true);
+    try {
+      const { data } = await fetchProfileForUser(normalized);
+      window.localStorage.setItem("userId", normalized);
+      setAuthUserId(normalized);
+      setLoginInput(normalized);
+      setLoginError("");
+      setProfile(data);
+      setActiveChatId(null);
+      setMessages([]);
+    } catch (error) {
+      window.localStorage.removeItem("userId");
+      setAuthUserId("");
+      setProfile(null);
+      setLoginError(error?.message || "Sign-in failed");
+    } finally {
+      setAuthChecking(false);
     }
   };
 
@@ -1027,6 +1097,64 @@ export function ChatApp() {
     if (sourceCount > 0) {
       latestAssistantWithSourcesId = message.id;
     }
+  }
+
+  if (!authUserId) {
+    return (
+      <div className="min-h-screen bg-base-200 p-4 md:p-6">
+        <div className="mx-auto flex min-h-[70vh] max-w-md items-center">
+          <div className="card w-full border border-base-300 bg-base-100 shadow-xl">
+            <div className="card-body gap-4">
+              <div>
+                <h1 className="text-2xl font-semibold">Sign in</h1>
+                <p className="text-sm opacity-70">
+                  Enter your 4+2 to open your chat history. IP addresses stay on the server.
+                </p>
+              </div>
+              <form className="flex flex-col gap-3" onSubmit={handleLoginSubmit}>
+                <label className="form-control">
+                  <span className="label-text text-sm font-medium">4+2</span>
+                  <input
+                    className="input input-bordered"
+                    type="text"
+                    inputMode="text"
+                    autoCapitalize="characters"
+                    autoComplete="username"
+                    maxLength={6}
+                    value={loginInput}
+                    onChange={(event) => {
+                      setLoginInput(normalizeUserId(event.target.value));
+                      if (loginError) {
+                        setLoginError("");
+                      }
+                    }}
+                    placeholder="1234AB"
+                    disabled={authChecking}
+                  />
+                </label>
+                {loginError ? (
+                  <div className="text-sm text-error">{loginError}</div>
+                ) : null}
+                <button className="btn btn-primary" type="submit" disabled={authChecking}>
+                  {authChecking ? "Signing in..." : "Continue"}
+                </button>
+              </form>
+              {releaseInfo ? (
+                <a
+                  className="link link-hover text-sm opacity-70"
+                  href={releaseInfo.changelogUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={releaseHoverTitle(releaseInfo)}
+                >
+                  Version {releaseInfo.version}
+                </a>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (debugMessageId) {
@@ -1316,68 +1444,23 @@ export function ChatApp() {
               </a>
             ) : null}
             {profile && profile.avatar ? (
-              <div className="dropdown dropdown-end">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-circle"
-                  tabIndex={0}
-                  ref={profileDropdownRef}
-                >
-                  <div className="avatar placeholder">
-                    <div
-                      className="w-9 rounded-full text-white flex items-center justify-center leading-none"
-                      style={{ backgroundColor: profile.avatar.color }}
-                    >
-                      <span className="text-sm font-semibold">
-                        {profile.avatar.initials}
-                      </span>
-                    </div>
+              <div className="flex items-center gap-2">
+                <div className="avatar placeholder">
+                  <div
+                    className="h-9 min-w-16 rounded-full px-2 text-white flex items-center justify-center leading-none"
+                    style={{ backgroundColor: profile.avatar.color }}
+                  >
+                    <span className="text-[10px] font-semibold tracking-tight">
+                      {profile.avatar.initials}
+                    </span>
                   </div>
+                </div>
+                <div className="hidden text-sm font-medium sm:block">
+                  {profile.user_id || authUserId}
+                </div>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={clearLoginState}>
+                  Switch user
                 </button>
-                <ul className="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-56 z-30">
-                  <li className="menu-title">
-                    <span>Profiles</span>
-                  </li>
-                  <li>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        selectProfile("");
-                        closeProfileDropdown();
-                      }}
-                    >
-                      Use my IP ({profile.ip})
-                    </button>
-                  </li>
-                  {profiles.map((item) => (
-                    <li key={item.ip}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          selectProfile(item.ip);
-                          closeProfileDropdown();
-                        }}
-                      >
-                        <span
-                          className="inline-block w-3 h-3 rounded-full mr-2"
-                          style={{ backgroundColor: item.avatar.color }}
-                        />
-                        {item.ip}
-                      </button>
-                    </li>
-                  ))}
-                  <li>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await addProfile();
-                        closeProfileDropdown();
-                      }}
-                    >
-                      Add profile...
-                    </button>
-                  </li>
-                </ul>
               </div>
             ) : null}
           </div>
