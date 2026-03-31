@@ -28,8 +28,8 @@ if __name__ == "__main__":
     service.db = database(":memory:")
     try:
         db = next(get_db())
-        user = db.t.users.insert(created_at="now", display_name="deps-check")
-        db.t.user_ips.insert(ip="127.0.0.1", user_id=user["id"], created_at="now")
+        user = db.t.users.insert(created_at="now", display_name="deps-check", login_code="1234AB")
+        db.t.user_ip_logs.insert(ip="127.0.0.1", user_id=user["id"], created_at="now")
         assert db.t.users[user["id"]] is not None
     finally:
         service.db = original_db

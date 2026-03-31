@@ -12,6 +12,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def auth_headers(user_id: str, ip: str | None = None, **extra: str) -> dict[str, str]:
+    headers = {"x-user-id": user_id}
+    if ip:
+        headers["x-forwarded-for"] = ip
+    headers.update(extra)
+    return headers
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test_app.db"
@@ -70,7 +78,7 @@ def test_startup_cleanup_executes_and_refreshes_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_load_llmapi", lambda: FakeLLM())
 
     with TestClient(main.app) as test_client:
-        response = test_client.get("/api/profile")
+        response = test_client.get("/api/release")
         assert response.status_code == 200
 
     assert calls == {"plan": 1, "apply": 1, "refresh": 1}
@@ -96,7 +104,7 @@ def test_startup_cleanup_fail_open_when_cleanup_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "plan_pages_cleanup", fake_plan)
 
     with TestClient(main.app) as test_client:
-        response = test_client.get("/api/profile")
+        response = test_client.get("/api/release")
         assert response.status_code == 200
 
 
@@ -123,17 +131,18 @@ def test_startup_docs_render_runs_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_render_docs_site_quarto", fake_render_docs)
 
     with TestClient(main.app) as test_client:
-        response = test_client.get("/api/profile")
+        response = test_client.get("/api/release")
         assert response.status_code == 200
 
     assert calls["docs_render"] == 1
 
 
 def test_profile_endpoint(client: TestClient):
-    response = client.get("/api/profile", headers={"x-profile-ip": "10.1.2.3"})
+    response = client.get("/api/profile", headers=auth_headers("1234AB", "10.1.2.3"))
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ip"] == "10.1.2.3"
+    assert payload["user_id"] == "1234AB"
+    assert "ip" not in payload
     assert "avatar" in payload
 
 
@@ -158,12 +167,12 @@ def test_chat_lifecycle(client: TestClient):
     create_response = client.post(
         "/api/chats",
         json={"title": "Test Chat"},
-        headers={"x-profile-ip": "1.2.3.4"},
+        headers=auth_headers("1111AA", "1.2.3.4"),
     )
     assert create_response.status_code == 200
     chat = create_response.json()["chat"]
 
-    list_response = client.get("/api/chats", headers={"x-profile-ip": "1.2.3.4"})
+    list_response = client.get("/api/chats", headers=auth_headers("1111AA", "1.2.3.4"))
     assert list_response.status_code == 200
     chat_ids = [item["id"] for item in list_response.json()["chats"]]
     assert chat["id"] in chat_ids
@@ -171,15 +180,44 @@ def test_chat_lifecycle(client: TestClient):
     rename_response = client.patch(
         f"/api/chats/{chat['id']}",
         json={"title": "Renamed"},
-        headers={"x-profile-ip": "1.2.3.4"},
+        headers=auth_headers("1111AA", "1.2.3.4"),
     )
     assert rename_response.status_code == 200
 
     delete_response = client.delete(
         f"/api/chats/{chat['id']}",
-        headers={"x-profile-ip": "1.2.3.4"},
+        headers=auth_headers("1111AA", "1.2.3.4"),
     )
     assert delete_response.status_code == 200
+
+
+def test_distinct_users_can_share_one_ip(client: TestClient):
+    import core.service as service
+
+    shared_ip = "55.66.77.88"
+
+    first = client.post(
+        "/api/chats",
+        json={"title": "Alpha"},
+        headers=auth_headers("4444DD", shared_ip),
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/chats",
+        json={"title": "Beta"},
+        headers=auth_headers("5555EE", shared_ip),
+    )
+    assert second.status_code == 200
+
+    first_list = client.get("/api/chats", headers=auth_headers("4444DD", shared_ip))
+    second_list = client.get("/api/chats", headers=auth_headers("5555EE", shared_ip))
+    assert [chat["title"] for chat in first_list.json()["chats"]] == ["Alpha"]
+    assert [chat["title"] for chat in second_list.json()["chats"]] == ["Beta"]
+
+    rows = list(service.db.t.user_ip_logs.rows_where("ip=?", [shared_ip]))
+    assert len(rows) == 2
+    assert len({row["user_id"] for row in rows}) == 2
 
 
 def test_stream_passes_prior_turn_history(client: TestClient, monkeypatch):
@@ -210,7 +248,7 @@ def test_stream_passes_prior_turn_history(client: TestClient, monkeypatch):
     create_chat = client.post(
         "/api/chats",
         json={"title": "History Test"},
-        headers={"x-profile-ip": "2.3.4.5"},
+        headers=auth_headers("2222BB", "2.3.4.5"),
     )
     assert create_chat.status_code == 200
     chat_id = create_chat.json()["chat"]["id"]
@@ -218,13 +256,17 @@ def test_stream_passes_prior_turn_history(client: TestClient, monkeypatch):
     first_turn = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "What is MyWay?"},
-        headers={"x-profile-ip": "2.3.4.5"},
+        headers=auth_headers("2222BB", "2.3.4.5"),
     )
     assert first_turn.status_code == 200
     first_payload = first_turn.json()
     first_stream = client.post(
         "/api/stream",
-        headers={"x-profile-ip": "2.3.4.5", "Content-Type": "application/x-www-form-urlencoded"},
+        headers=auth_headers(
+            "2222BB",
+            "2.3.4.5",
+            **{"Content-Type": "application/x-www-form-urlencoded"},
+        ),
         data={
             "message": "What is MyWay?",
             "stream_id": first_payload["stream_id"],
@@ -238,13 +280,17 @@ def test_stream_passes_prior_turn_history(client: TestClient, monkeypatch):
     second_turn = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "How do I enroll?"},
-        headers={"x-profile-ip": "2.3.4.5"},
+        headers=auth_headers("2222BB", "2.3.4.5"),
     )
     assert second_turn.status_code == 200
     second_payload = second_turn.json()
     second_stream = client.post(
         "/api/stream",
-        headers={"x-profile-ip": "2.3.4.5", "Content-Type": "application/x-www-form-urlencoded"},
+        headers=auth_headers(
+            "2222BB",
+            "2.3.4.5",
+            **{"Content-Type": "application/x-www-form-urlencoded"},
+        ),
         data={
             "message": "How do I enroll?",
             "stream_id": second_payload["stream_id"],
@@ -270,7 +316,7 @@ def test_build_rewrite_history_includes_fallback_metadata(client: TestClient):
     create_chat = client.post(
         "/api/chats",
         json={"title": "History Metadata"},
-        headers={"x-profile-ip": "3.4.5.6"},
+        headers=auth_headers("3333CC", "3.4.5.6"),
     )
     assert create_chat.status_code == 200
     chat_id = create_chat.json()["chat"]["id"]
@@ -278,7 +324,7 @@ def test_build_rewrite_history_includes_fallback_metadata(client: TestClient):
     first_turn = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "Customer is off for nonpayment"},
-        headers={"x-profile-ip": "3.4.5.6"},
+        headers=auth_headers("3333CC", "3.4.5.6"),
     )
     assert first_turn.status_code == 200
     first_payload = first_turn.json()
@@ -300,7 +346,7 @@ def test_build_rewrite_history_includes_fallback_metadata(client: TestClient):
     second_turn = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "traditional"},
-        headers={"x-profile-ip": "3.4.5.6"},
+        headers=auth_headers("3333CC", "3.4.5.6"),
     )
     assert second_turn.status_code == 200
     second_payload = second_turn.json()
@@ -356,7 +402,7 @@ def test_stream_persists_fallback_debug_payload(client: TestClient, monkeypatch)
     create_chat = client.post(
         "/api/chats",
         json={"title": "Fallback Debug"},
-        headers={"x-profile-ip": "7.8.9.10"},
+        headers=auth_headers("7777DD", "7.8.9.10"),
     )
     assert create_chat.status_code == 200
     chat_id = create_chat.json()["chat"]["id"]
@@ -364,14 +410,18 @@ def test_stream_persists_fallback_debug_payload(client: TestClient, monkeypatch)
     create_msg = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "Need help"},
-        headers={"x-profile-ip": "7.8.9.10"},
+        headers=auth_headers("7777DD", "7.8.9.10"),
     )
     assert create_msg.status_code == 200
     payload = create_msg.json()
 
     stream_resp = client.post(
         "/api/stream",
-        headers={"x-profile-ip": "7.8.9.10", "Content-Type": "application/x-www-form-urlencoded"},
+        headers=auth_headers(
+            "7777DD",
+            "7.8.9.10",
+            **{"Content-Type": "application/x-www-form-urlencoded"},
+        ),
         data={
             "message": "Need help",
             "stream_id": payload["stream_id"],
@@ -386,7 +436,7 @@ def test_stream_persists_fallback_debug_payload(client: TestClient, monkeypatch)
 
     debug_resp = client.get(
         f"/api/messages/{payload['assistant_message_id']}/debug",
-        headers={"x-profile-ip": "7.8.9.10"},
+        headers=auth_headers("7777DD", "7.8.9.10"),
     )
     assert debug_resp.status_code == 200
     debug = debug_resp.json()["debug"]
@@ -412,7 +462,7 @@ def test_stream_error_event_uses_friendly_message_and_persists(client: TestClien
     create_chat = client.post(
         "/api/chats",
         json={"title": "Friendly Error"},
-        headers={"x-profile-ip": "8.8.8.8"},
+        headers=auth_headers("8888EE", "8.8.8.8"),
     )
     assert create_chat.status_code == 200
     chat_id = create_chat.json()["chat"]["id"]
@@ -420,7 +470,7 @@ def test_stream_error_event_uses_friendly_message_and_persists(client: TestClien
     create_msg = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "elephant"},
-        headers={"x-profile-ip": "8.8.8.8"},
+        headers=auth_headers("8888EE", "8.8.8.8"),
     )
     assert create_msg.status_code == 200
     payload = create_msg.json()
@@ -428,7 +478,11 @@ def test_stream_error_event_uses_friendly_message_and_persists(client: TestClien
 
     stream_resp = client.post(
         "/api/stream",
-        headers={"x-profile-ip": "8.8.8.8", "Content-Type": "application/x-www-form-urlencoded"},
+        headers=auth_headers(
+            "8888EE",
+            "8.8.8.8",
+            **{"Content-Type": "application/x-www-form-urlencoded"},
+        ),
         data={
             "message": "elephant",
             "stream_id": payload["stream_id"],
@@ -442,7 +496,7 @@ def test_stream_error_event_uses_friendly_message_and_persists(client: TestClien
 
     messages_resp = client.get(
         f"/api/chats/{chat_id}/messages?limit=20",
-        headers={"x-profile-ip": "8.8.8.8"},
+        headers=auth_headers("8888EE", "8.8.8.8"),
     )
     assert messages_resp.status_code == 200
     assistant_row = next(
@@ -469,7 +523,7 @@ def test_stream_exception_uses_friendly_message_and_persists(client: TestClient,
     create_chat = client.post(
         "/api/chats",
         json={"title": "Exception Error"},
-        headers={"x-profile-ip": "8.8.4.4"},
+        headers=auth_headers("9999FF", "8.8.4.4"),
     )
     assert create_chat.status_code == 200
     chat_id = create_chat.json()["chat"]["id"]
@@ -477,7 +531,7 @@ def test_stream_exception_uses_friendly_message_and_persists(client: TestClient,
     create_msg = client.post(
         f"/api/chats/{chat_id}/messages",
         json={"message": "elephant"},
-        headers={"x-profile-ip": "8.8.4.4"},
+        headers=auth_headers("9999FF", "8.8.4.4"),
     )
     assert create_msg.status_code == 200
     payload = create_msg.json()
@@ -485,7 +539,11 @@ def test_stream_exception_uses_friendly_message_and_persists(client: TestClient,
 
     stream_resp = client.post(
         "/api/stream",
-        headers={"x-profile-ip": "8.8.4.4", "Content-Type": "application/x-www-form-urlencoded"},
+        headers=auth_headers(
+            "9999FF",
+            "8.8.4.4",
+            **{"Content-Type": "application/x-www-form-urlencoded"},
+        ),
         data={
             "message": "elephant",
             "stream_id": payload["stream_id"],
@@ -499,7 +557,7 @@ def test_stream_exception_uses_friendly_message_and_persists(client: TestClient,
 
     messages_resp = client.get(
         f"/api/chats/{chat_id}/messages?limit=20",
-        headers={"x-profile-ip": "8.8.4.4"},
+        headers=auth_headers("9999FF", "8.8.4.4"),
     )
     assert messages_resp.status_code == 200
     assistant_row = next(

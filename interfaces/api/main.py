@@ -55,6 +55,7 @@ HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
 _LLMAPI = None
 _SCRAPER_DB = None
 _TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
+_LOGIN_CODE_RE = re.compile(r"^[A-Z0-9]{6}$")
 _STREAM_ERROR_FALLBACK = "I hit a temporary problem generating a response. Please try again."
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class ChatUpdate(BaseModel):
 
 
 class ProfileCreate(BaseModel):
-    ip: str
+    user_id: str
 
 
 class MessageCreate(BaseModel):
@@ -346,17 +347,34 @@ def _client_ip(request: Request) -> str:
     return "unknown"
 
 
-def _avatar_from_ip(ip: str) -> dict[str, str]:
-    digest = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+def _normalize_login_code(value: str) -> str:
+    cleaned = "".join(ch for ch in str(value or "") if ch.isalnum()).upper()
+    if _LOGIN_CODE_RE.fullmatch(cleaned):
+        return cleaned
+    return ""
+
+
+def _avatar_from_user_id(user_id: str) -> dict[str, str]:
+    digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()
     hue = int(digest[:6], 16) % 360
     color = f"hsl({hue} 65% 55%)"
-    label = ip.split(".")[-1] if "." in ip else ip[:2]
-    initials = (label or "IP")[:2].upper()
+    initials = (user_id or "U").upper()
     return {"color": color, "initials": initials}
 
 
+def _login_code(request: Request) -> str:
+    raw = request.headers.get("x-user-id", "")
+    if not raw.strip():
+        raise HTTPException(status_code=401, detail="Login required")
+
+    login_code = _normalize_login_code(raw)
+    if not login_code:
+        raise HTTPException(status_code=400, detail="4+2 must be 6 letters and numbers")
+    return login_code
+
+
 def _user_id(request: Request) -> int:
-    return service.get_or_create_user_by_ip(_client_ip(request))
+    return service.get_or_create_user_by_login(_login_code(request), _client_ip(request))
 
 
 def _normalize_stream_error_message(value: object) -> str:
@@ -767,9 +785,10 @@ def _startup() -> None:
 
 @api.get("/profile")
 def profile(request: Request) -> dict[str, object]:
-    ip = _client_ip(request)
-    avatar = _avatar_from_ip(ip)
-    return {"ip": ip, "avatar": avatar}
+    user_id = _login_code(request)
+    service.get_or_create_user_by_login(user_id, _client_ip(request))
+    avatar = _avatar_from_user_id(user_id)
+    return {"user_id": user_id, "avatar": avatar}
 
 
 @api.get("/release")
@@ -783,17 +802,19 @@ def release() -> dict[str, str]:
 def profiles() -> dict[str, object]:
     items = []
     for row in service.list_profiles(limit=100):
-        ip = row["ip"]
-        items.append({"ip": ip, "avatar": _avatar_from_ip(ip)})
+        user_id = str(row.get("login_code") or "").strip()
+        if not user_id:
+            continue
+        items.append({"user_id": user_id, "avatar": _avatar_from_user_id(user_id)})
     return {"profiles": items}
 
 
 @api.post("/profiles")
-def create_profile(payload: ProfileCreate) -> dict[str, bool]:
-    ip = payload.ip.strip() if payload.ip else ""
-    if not ip:
-        raise HTTPException(status_code=400, detail="IP is empty")
-    service.get_or_create_user_by_ip(ip)
+def create_profile(payload: ProfileCreate, request: Request) -> dict[str, bool]:
+    user_id = _normalize_login_code(payload.user_id)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="4+2 must be 6 letters and numbers")
+    service.get_or_create_user_by_login(user_id, _client_ip(request))
     return {"ok": True}
 
 
@@ -1268,8 +1289,12 @@ if __name__ == "__main__":
     if args.check:
         service.create_db_and_tables()
         client = TestClient(app)
-        response = client.get("/api/profile", headers={"x-profile-ip": "127.0.0.1"})
+        response = client.get(
+            "/api/profile",
+            headers={"x-user-id": "1234AB", "x-forwarded-for": "127.0.0.1"},
+        )
         assert response.status_code == 200
+        assert response.json()["user_id"] == "1234AB"
         print("Check Passed")
     else:
         uvicorn.run(

@@ -9,9 +9,17 @@ class UserRow(TypedDict):
     id: int
     created_at: str
     display_name: str | None
+    login_code: NotRequired[str | None]
 
 
 class UserIPRow(TypedDict):
+    ip: str
+    user_id: int
+    created_at: str
+
+
+class UserIPLogRow(TypedDict):
+    id: int
     ip: str
     user_id: int
     created_at: str
@@ -63,13 +71,20 @@ class FeedbackRow(TypedDict):
 
 APP_TABLE_DEFS: dict[str, dict[str, Any]] = {
     "users": {
-        "columns": {"id": int, "created_at": str, "display_name": str},
+        "columns": {"id": int, "created_at": str, "display_name": str, "login_code": str},
         "pk": "id",
+        "indexes": [{"columns": ["login_code"], "unique": True}],
     },
     "user_ips": {
         "columns": {"ip": str, "user_id": int, "created_at": str},
         "pk": "ip",
         "foreign_keys": [("user_id", "users")],
+    },
+    "user_ip_logs": {
+        "columns": {"id": int, "ip": str, "user_id": int, "created_at": str},
+        "pk": "id",
+        "foreign_keys": [("user_id", "users")],
+        "indexes": [{"columns": ["user_id"]}, {"columns": ["ip"]}, {"columns": ["user_id", "ip"], "unique": True}],
     },
     "chats": {
         "columns": {
@@ -162,8 +177,9 @@ if __name__ == "__main__":
     test_db = database(":memory:")
     ensure_app_schema(test_db)
 
-    user = test_db.t.users.insert(created_at="now", display_name="check-user")
+    user = test_db.t.users.insert(created_at="now", display_name="check-user", login_code="1234AB")
     test_db.t.user_ips.insert(ip="127.0.0.1", user_id=user["id"], created_at="now")
+    test_db.t.user_ip_logs.insert(ip="127.0.0.1", user_id=user["id"], created_at="now")
     chat = test_db.t.chats.insert(user_id=user["id"], created_at="now", title="Check Chat")
     cache = test_db.t.cache_entries.insert(
         question_norm="hello",

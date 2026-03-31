@@ -50,7 +50,17 @@ def hash_question(question_norm: str) -> str:
     return hashlib.sha256(question_norm.encode("utf-8")).hexdigest()
 
 
+def normalize_login_code(value: str) -> str:
+    cleaned = "".join(ch for ch in str(value or "") if ch.isalnum()).upper()
+    return cleaned if len(cleaned) == 6 else ""
+
+
 def _ensure_optional_columns() -> None:
+    user_cols = {row["name"] for row in db.q("PRAGMA table_info(users);")}
+    if "login_code" not in user_cols:
+        db.q("ALTER TABLE users ADD COLUMN login_code TEXT;")
+    db.q("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_code ON users(login_code);")
+
     message_cols = {row["name"] for row in db.q("PRAGMA table_info(messages);")}
     if "debug_json" not in message_cols:
         db.q("ALTER TABLE messages ADD COLUMN debug_json TEXT;")
@@ -64,6 +74,21 @@ def _ensure_optional_columns() -> None:
     cache_cols = {row["name"] for row in db.q("PRAGMA table_info(cache_entries);")}
     if "last_used_at" not in cache_cols:
         db.q("ALTER TABLE cache_entries ADD COLUMN last_used_at TEXT;")
+
+    db.q(
+        """
+        CREATE TABLE IF NOT EXISTS user_ip_logs (
+            id INTEGER PRIMARY KEY,
+            ip TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
+    db.q("CREATE INDEX IF NOT EXISTS idx_user_ip_logs_user_id ON user_ip_logs(user_id);")
+    db.q("CREATE INDEX IF NOT EXISTS idx_user_ip_logs_ip ON user_ip_logs(ip);")
+    db.q("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_ip_logs_user_ip ON user_ip_logs(user_id, ip);")
 
 
 def _ensure_default_user_and_chat() -> None:
@@ -101,8 +126,35 @@ def get_or_create_user_by_ip(ip: str) -> int:
     return user_id
 
 
+def record_user_ip(user_id: int, ip: str) -> None:
+    cleaned = (ip or "").strip()
+    if not cleaned:
+        return
+    existing = list(db.t.user_ip_logs.rows_where("user_id=? AND ip=?", [user_id, cleaned], limit=1))
+    if existing:
+        return
+    db.t.user_ip_logs.insert(ip=cleaned, user_id=user_id, created_at=_now_iso())
+
+
+def get_or_create_user_by_login(login_code: str, ip: str = "") -> int:
+    cleaned = normalize_login_code(login_code)
+    if not cleaned:
+        raise ValueError("Invalid login code")
+
+    existing = list(db.t.users.rows_where("login_code=?", [cleaned], limit=1))
+    if existing:
+        user_id = int(existing[0]["id"])
+        record_user_ip(user_id, ip)
+        return user_id
+
+    user = db.t.users.insert(created_at=_now_iso(), display_name=cleaned, login_code=cleaned)
+    user_id = int(user["id"])
+    record_user_ip(user_id, ip)
+    return user_id
+
+
 def list_profiles(limit: int = 100) -> list[dict[str, Any]]:
-    rows = list(db.t.user_ips())
+    rows = [row for row in db.t.users() if (row.get("login_code") or "").strip()]
     rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
     return rows[:limit]
 
@@ -337,7 +389,7 @@ if __name__ == "__main__":
     db = temp_db  # type: ignore[assignment]
     try:
         create_db_and_tables()
-        user_id = get_or_create_user_by_ip("127.0.0.1")
+        user_id = get_or_create_user_by_login("1234AB", "127.0.0.1")
         chat_id = create_chat(user_id=user_id, title="Check Chat")
         message_id = insert_message(
             chat_id=chat_id,
@@ -349,6 +401,8 @@ if __name__ == "__main__":
         message = get_message(message_id)
         assert chat_belongs_to_user(chat_id, user_id)
         assert message is not None
+        assert (db.t.users[user_id].get("login_code") or "") == "1234AB"
+        assert list(db.t.user_ip_logs.rows_where("user_id=? AND ip=?", [user_id, "127.0.0.1"], limit=1))
         assert message.get("app_version") == "0.0.0-test"
         assert hash_question(normalize_question("hello world"))
         upsert_cache_good("hello world", "answer", [{"url": "https://example.com"}])
