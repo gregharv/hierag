@@ -157,7 +157,7 @@ def hash_question(question_norm: str) -> str:
 
 def normalize_login_code(value: str) -> str:
     cleaned = "".join(ch for ch in str(value or "") if ch.isalnum()).upper()
-    return cleaned if len(cleaned) == 6 else ""
+    return cleaned if 6 <= len(cleaned) <= 7 else ""
 
 
 def _ensure_optional_columns() -> None:

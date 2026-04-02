@@ -4,7 +4,7 @@ import { ChatApp } from "./components/ChatApp";
 import { useApiBase } from "./hooks/useApiBase";
 
 function normalizeUserId(value: string) {
-  return value.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 6);
+  return value.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 7);
 }
 
 export default function App() {

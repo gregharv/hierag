@@ -20,6 +20,8 @@ const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 const INLINE_SOURCE_LINKS_MAX = 2;
 const SIDEBAR_CHAT_PREVIEW_MAX = 40;
 const SIDEBAR_CHAT_PREVIEW_WORD_BREAK_MIN = 24;
+const USER_ID_MIN_LENGTH = 6;
+const USER_ID_MAX_LENGTH = 7;
 const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
   /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
 const TAB_STEP_FRAGMENT_RE = /#tab-step\d+\b/i;
@@ -100,7 +102,7 @@ function normalizeUserId(value) {
   const cleaned = String(value || "")
     .replace(/[^a-z0-9]/gi, "")
     .toUpperCase();
-  return cleaned.slice(0, 6);
+  return cleaned.slice(0, USER_ID_MAX_LENGTH);
 }
 
 function MenuIcon() {
@@ -1295,8 +1297,8 @@ export function ChatApp() {
   const handleLoginSubmit = async (event) => {
     event.preventDefault();
     const normalized = normalizeUserId(loginInput);
-    if (normalized.length !== 6) {
-      setLoginError("Enter your 4+2 as 6 letters and numbers.");
+    if (normalized.length < USER_ID_MIN_LENGTH || normalized.length > USER_ID_MAX_LENGTH) {
+      setLoginError("Enter your 4+2 as 6 or 7 letters and numbers.");
       return;
     }
 
@@ -1469,7 +1471,7 @@ export function ChatApp() {
                     inputMode="text"
                     autoCapitalize="characters"
                     autoComplete="username"
-                    maxLength={6}
+                    maxLength={USER_ID_MAX_LENGTH}
                     value={loginInput}
                     onChange={(event) => {
                       setLoginInput(normalizeUserId(event.target.value));
