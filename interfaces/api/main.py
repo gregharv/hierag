@@ -56,7 +56,7 @@ HYBRID_RETRIEVAL_QUARTO_HTML = PROJECT_ROOT / "docs" / "hybrid-retrieval.html"
 _LLMAPI = None
 _SCRAPER_DB = None
 _TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
-_LOGIN_CODE_RE = re.compile(r"^[A-Z0-9]{6,7}$")
+_LOGIN_CODE_RE = re.compile(r"^[A-Z0-9]{5,7}$")
 _STREAM_ERROR_FALLBACK = "I hit a temporary problem generating a response. Please try again."
 logger = logging.getLogger(__name__)
 
@@ -370,7 +370,7 @@ def _login_code(request: Request) -> str:
 
     login_code = _normalize_login_code(raw)
     if not login_code:
-        raise HTTPException(status_code=400, detail="4+2 must be 6 or 7 letters and numbers")
+        raise HTTPException(status_code=400, detail="4+2 must be 5 to 7 letters and numbers")
     return login_code
 
 
@@ -855,7 +855,7 @@ def profiles() -> dict[str, object]:
 def create_profile(payload: ProfileCreate, request: Request) -> dict[str, bool]:
     user_id = _normalize_login_code(payload.user_id)
     if not user_id:
-        raise HTTPException(status_code=400, detail="4+2 must be 6 or 7 letters and numbers")
+        raise HTTPException(status_code=400, detail="4+2 must be 5 to 7 letters and numbers")
     service.get_or_create_user_by_login(user_id, _client_ip(request))
     return {"ok": True}
 

@@ -203,6 +203,15 @@ def test_profile_endpoint(client: TestClient):
     assert "avatar" in payload
 
 
+def test_profile_endpoint_accepts_five_character_login(client: TestClient):
+    response = client.get("/api/profile", headers=auth_headers("1234A", "10.1.2.3"))
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == "1234A"
+    assert "ip" not in payload
+    assert "avatar" in payload
+
+
 def test_profile_endpoint_accepts_seven_character_login(client: TestClient):
     response = client.get("/api/profile", headers=auth_headers("1234AB1", "10.1.2.3"))
     assert response.status_code == 200

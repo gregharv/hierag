@@ -20,7 +20,7 @@ const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 const INLINE_SOURCE_LINKS_MAX = 2;
 const SIDEBAR_CHAT_PREVIEW_MAX = 40;
 const SIDEBAR_CHAT_PREVIEW_WORD_BREAK_MIN = 24;
-const USER_ID_MIN_LENGTH = 6;
+const USER_ID_MIN_LENGTH = 5;
 const USER_ID_MAX_LENGTH = 7;
 const PROCEDURE_LINKS_TRAILING_BLOCK_RE =
   /(?:\r?\n){2}Procedure links:\s*(?:\r?\n)- \[[^\]]+\]\([^)]+\)(?:\r?\n- \[[^\]]+\]\([^)]+\))*\s*$/i;
@@ -1298,7 +1298,7 @@ export function ChatApp() {
     event.preventDefault();
     const normalized = normalizeUserId(loginInput);
     if (normalized.length < USER_ID_MIN_LENGTH || normalized.length > USER_ID_MAX_LENGTH) {
-      setLoginError("Enter your 4+2 as 6 or 7 letters and numbers.");
+      setLoginError("Enter your 4+2 as 5 to 7 letters and numbers.");
       return;
     }
 

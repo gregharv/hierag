@@ -156,6 +156,16 @@ class _FailIfOpenAI:
         raise AssertionError("OpenAI should not be called for low-signal off-topic requests")
 
 
+class _ErroringResponses:
+    def create(self, *args, **kwargs):
+        raise RuntimeError("simulated best-effort failure")
+
+
+class _ErroringOpenAI:
+    def __init__(self, *args, **kwargs):
+        self.responses = _ErroringResponses()
+
+
 def test_stream_dual_merge_prefers_original_signal_and_disables_glossary(monkeypatch):
     db, chunk_meta = _seed_flow_db()
     chunk_ids = sorted(chunk_meta.keys())
@@ -588,6 +598,18 @@ def test_build_allowed_source_links_for_prompt_dedupes_and_filters():
     assert links[0]["url"] == "https://connections/?docs=residential/alpha"
     assert links[1]["url"] == "https://connections/?docs=residential/beta"
     assert all("#tab-step" not in item["url"] for item in links)
+
+
+def test_build_best_effort_answer_uses_generic_fallback_when_model_call_fails(monkeypatch):
+    monkeypatch.setattr(flow, "OpenAI", _ErroringOpenAI)
+
+    answer = flow._build_best_effort_answer(
+        query="What are the charging recommendations or best practices for electric cars?",
+        context="Context: Home > Contacts List > Resources for Customers",
+    )
+
+    assert answer == flow.BEST_EFFORT_FALLBACK_REPLY
+    assert "nonpayment workflow" not in answer.lower()
 
 
 def test_hydrate_sources_drops_items_without_raw_scores():

@@ -61,6 +61,10 @@ OFF_TOPIC_NO_SOURCES_REPLY = (
     "I could not find relevant Connections sources for that question. "
     "Ask about Connections policies, programs, or customer-service workflows."
 )
+BEST_EFFORT_FALLBACK_REPLY = (
+    "I could not determine a reliable answer from the retrieved Connections sources. "
+    "Please restate the question with the specific policy, program, customer type, or workflow step."
+)
 _IDK_PREFIX_RE = re.compile(
     r"^\s*(?:"
     r"i(?:\s+[a-z]+){0,3}\s+(?:do\s*not|don[\W_]*t)\s+know"
@@ -644,11 +648,7 @@ def _recent_clarify_turns(history: list[dict] | None, window: int = FALLBACK_LOO
 
 
 def _build_best_effort_answer(query: str, context: str, history: list[dict] | None = None) -> str:
-    fallback = (
-        "Based on the available context, use the standard nonpayment workflow: verify account security, "
-        "confirm disconnection status, share balance and payment options, and apply the correct program-specific "
-        "reconnection steps for the active account."
-    )
+    fallback = BEST_EFFORT_FALLBACK_REPLY
     context_text = str(context or "").strip()
     if not context_text:
         return fallback
