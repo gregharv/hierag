@@ -19,6 +19,11 @@ uv sync
 uv run uvicorn interfaces.api.main:app --reload --port 8510
 ```
 
+Useful env vars:
+
+- `HIERAG_ADMIN_LOGIN_CODES`: comma-separated admin 4+2s.
+- `HIERAG_PILOT_LOGIN_CODES`: comma-separated 4+2s that make up the pilot group used by the admin stats "Pilot group only" filter.
+
 Run tests:
 
 ```bash

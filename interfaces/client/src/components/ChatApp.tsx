@@ -491,6 +491,7 @@ export function ChatApp() {
     end: "",
     user_id_search: "",
     sort: "last_interaction_at:desc",
+    pilot_only: false,
     page: 1,
     page_size: 25,
   });
@@ -650,6 +651,7 @@ export function ChatApp() {
     if (nextFilters.end) params.set("end", nextFilters.end);
     if (nextFilters.user_id_search) params.set("user_id_search", nextFilters.user_id_search);
     if (nextFilters.sort) params.set("sort", nextFilters.sort);
+    if (nextFilters.pilot_only) params.set("pilot_only", "true");
     params.set("page", String(nextFilters.page || 1));
     params.set("page_size", String(nextFilters.page_size || 25));
 
@@ -1589,6 +1591,21 @@ export function ChatApp() {
                         }))
                       }
                       placeholder="Filter by 4+2"
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm">Pilot group only</span>
+                    <input
+                      className="checkbox checkbox-primary mt-3"
+                      type="checkbox"
+                      checked={statsFilters.pilot_only}
+                      onChange={(event) =>
+                        setStatsFilters((prev) => ({
+                          ...prev,
+                          pilot_only: event.target.checked,
+                          page: 1,
+                        }))
+                      }
                     />
                   </label>
                   <label className="form-control">

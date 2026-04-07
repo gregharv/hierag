@@ -1112,6 +1112,7 @@ def admin_user_stats(
     end: str | None = None,
     user_id_search: str | None = None,
     sort: str = "last_interaction_at:desc",
+    pilot_only: bool = False,
     page: int = 1,
     page_size: int = 25,
 ) -> dict[str, object]:
@@ -1125,6 +1126,7 @@ def admin_user_stats(
         end=end_value,
         user_id_search=user_id_search,
         sort=sort,
+        pilot_only=pilot_only,
         page=page,
         page_size=page_size,
     )
@@ -1138,6 +1140,7 @@ def admin_user_stats(
             "end": end_value,
             "user_id_search": str(user_id_search or "").strip(),
             "sort": sort,
+            "pilot_only": pilot_only,
         },
         "admin_user_id": admin_login,
     }

@@ -735,6 +735,37 @@ def test_admin_stats_and_interaction_detail_use_latest_feedback(client: TestClie
     assert detail["sources"][0]["url"] == "https://connections/?docs=residential/transfer-service"
 
 
+def test_admin_stats_pilot_group_filter_uses_env_whitelist(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+    monkeypatch.setenv("HIERAG_PILOT_LOGIN_CODES", "1111AA, 3333CC")
+
+    seed_admin_interaction(
+        login_code="1111AA",
+        question="Pilot group question",
+        answer="Pilot group answer",
+    )
+    seed_admin_interaction(
+        login_code="2222BB",
+        question="Non-pilot question",
+        answer="Non-pilot answer",
+    )
+    seed_admin_interaction(
+        login_code="3333CC",
+        question="Another pilot question",
+        answer="Another pilot answer",
+    )
+
+    response = client.get(
+        "/api/admin/stats/users?range=all&sort=user_id:asc&pilot_only=true",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["user_id"] for item in payload["users"]] == ["1111AA", "3333CC"]
+    assert payload["summary"]["user_count"] == 2
+    assert payload["filters"]["pilot_only"] is True
+
+
 def test_admin_interaction_filters_support_search_and_unrated(client: TestClient, monkeypatch):
     monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
 

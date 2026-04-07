@@ -164,6 +164,20 @@ def normalize_login_code(value: str) -> str:
     return cleaned if 5 <= len(cleaned) <= 7 else ""
 
 
+def _env_login_codes(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    codes: set[str] = set()
+    for item in raw.split(","):
+        code = normalize_login_code(item)
+        if code:
+            codes.add(code)
+    return codes
+
+
+def get_pilot_login_codes() -> set[str]:
+    return _env_login_codes("HIERAG_PILOT_LOGIN_CODES")
+
+
 def _ensure_optional_columns() -> None:
     user_cols = {row["name"] for row in db.q("PRAGMA table_info(users);")}
     if "login_code" not in user_cols:
@@ -473,6 +487,7 @@ def list_admin_user_stats(
     end: str | None = None,
     user_id_search: str | None = None,
     sort: str | None = None,
+    pilot_only: bool = False,
     page: int = 1,
     page_size: int = 25,
 ) -> dict[str, Any]:
@@ -516,6 +531,13 @@ def list_admin_user_stats(
             item["last_interaction_at"] = asked_at
 
     rows = list(grouped.values())
+    if pilot_only:
+        pilot_login_codes = get_pilot_login_codes()
+        rows = [
+            row
+            for row in rows
+            if str(row.get("user_id") or "").strip().upper() in pilot_login_codes
+        ]
     search_value = str(user_id_search or "").strip().upper()
     if search_value:
         rows = [row for row in rows if search_value in str(row.get("user_id") or "").upper()]
