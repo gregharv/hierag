@@ -391,18 +391,19 @@ function toDateTimeLocalValue(value) {
   if (!value || typeof value !== "string") return "";
   const parsed = parseTimestamp(value);
   if (!parsed) return "";
-  const pad = (num) => String(num).padStart(2, "0");
-  return [
-    parsed.getFullYear(),
-    "-",
-    pad(parsed.getMonth() + 1),
-    "-",
-    pad(parsed.getDate()),
-    "T",
-    pad(parsed.getHours()),
-    ":",
-    pad(parsed.getMinutes()),
-  ].join("");
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CHAT_TIME_ZONE,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(parsed);
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.year || "0000"}-${lookup.month || "00"}-${lookup.day || "00"}T${lookup.hour || "00"}:${lookup.minute || "00"}`;
 }
 
 function formatRatingLabel(value) {
@@ -1543,7 +1544,7 @@ export function ChatApp() {
                     </select>
                   </label>
                   <label className="form-control">
-                    <span className="label-text text-sm">Start</span>
+                    <span className="label-text text-sm">Start (ET)</span>
                     <input
                       className="input input-bordered"
                       type="datetime-local"
@@ -1559,7 +1560,7 @@ export function ChatApp() {
                     />
                   </label>
                   <label className="form-control">
-                    <span className="label-text text-sm">End</span>
+                    <span className="label-text text-sm">End (ET)</span>
                     <input
                       className="input input-bordered"
                       type="datetime-local"
@@ -1754,7 +1755,7 @@ export function ChatApp() {
                     </select>
                   </label>
                   <label className="form-control">
-                    <span className="label-text text-sm">Start</span>
+                    <span className="label-text text-sm">Start (ET)</span>
                     <input
                       className="input input-bordered"
                       type="datetime-local"
@@ -1770,7 +1771,7 @@ export function ChatApp() {
                     />
                   </label>
                   <label className="form-control">
-                    <span className="label-text text-sm">End</span>
+                    <span className="label-text text-sm">End (ET)</span>
                     <input
                       className="input input-bordered"
                       type="datetime-local"

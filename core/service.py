@@ -5,6 +5,7 @@ import json
 import math
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "app_runtime.db"
+ADMIN_FILTER_TIME_ZONE = ZoneInfo("America/New_York")
 
 
 def _resolve_db_path() -> Path:
@@ -54,7 +56,9 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        # Admin time filters are entered as wall-clock time in the same
+        # America/New_York timezone used by the Asked column.
+        parsed = parsed.replace(tzinfo=ADMIN_FILTER_TIME_ZONE)
     return parsed.astimezone(timezone.utc)
 
 

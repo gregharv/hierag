@@ -760,3 +760,42 @@ def test_admin_interaction_filters_support_search_and_unrated(client: TestClient
     assert len(unrated_items) == 1
     assert unrated_items[0]["user_id"] == "3333CC"
     assert unrated_items[0]["rating"] == 0
+
+
+def test_admin_custom_datetime_filters_align_with_asked_column_time_zone(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    import core.service as service
+
+    row = seed_admin_interaction(
+        login_code="5555EE",
+        question="When was this asked?",
+        answer="Time zone test answer",
+    )
+    asked_at_utc = "2026-04-07T14:30:00Z"
+    answered_at_utc = "2026-04-07T14:31:00Z"
+    service.db.t.messages.update({"id": row["user_message_id"], "created_at": asked_at_utc})
+    service.db.t.messages.update({"id": row["assistant_message_id"], "created_at": answered_at_utc})
+    service.db.t.chats.update({"id": row["chat_id"], "last_message_at": answered_at_utc})
+
+    query = "range=custom&start=2026-04-07T10:00:00&end=2026-04-07T11:00:00"
+
+    stats_response = client.get(
+        f"/api/admin/stats/users?{query}",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert stats_response.status_code == 200
+    stats_users = stats_response.json()["users"]
+    assert len(stats_users) == 1
+    assert stats_users[0]["user_id"] == "5555EE"
+    assert stats_users[0]["question_count"] == 1
+
+    interactions_response = client.get(
+        f"/api/admin/interactions?{query}",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert interactions_response.status_code == 200
+    interactions = interactions_response.json()["interactions"]
+    assert len(interactions) == 1
+    assert interactions[0]["user_id"] == "5555EE"
+    assert interactions[0]["asked_at"] == asked_at_utc
