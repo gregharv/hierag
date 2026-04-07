@@ -48,7 +48,7 @@ def main() -> int:
         COALESCE((SELECT m.created_at FROM messages m
                   WHERE m.chat_id = a.chat_id AND m.role = 'user'
                     AND (m.created_at < a.created_at OR (m.created_at = a.created_at AND m.id < a.id))
-                  ORDER BY m.created_at DESC, m.id DESC LIMIT 1), a.created_at) AS asked_at,
+                  ORDER BY m.created_at DESC, m.id DESC LIMIT 1), a.created_at) AS Datetime,
         a.content AS "LLM Answer",
         a.debug_json,
         COALESCE((SELECT f.rating FROM feedback f
@@ -59,7 +59,7 @@ def main() -> int:
       LEFT JOIN users u ON u.id = c.user_id
       WHERE a.role = 'assistant'
     )
-    SELECT * FROM q WHERE asked_at >= ? ORDER BY asked_at, assistant_message_id
+    SELECT * FROM q WHERE Datetime >= ? ORDER BY Datetime, assistant_message_id
     """
 
     with sqlite3.connect(db) as con:
@@ -67,7 +67,7 @@ def main() -> int:
 
     df["Rewritten Query"] = df["debug_json"].map(rewritten)
     df["Rating"] = df["Rating"].fillna(0).astype(int)
-    df[["User", "Question", "Rewritten Query", "LLM Answer", "Rating"]].to_excel(out, index=False, engine="openpyxl")
+    df[["User", "Datetime", "Question", "Rewritten Query", "Rating", "LLM Answer"]].to_excel(out, index=False, engine="openpyxl")
     print(f"Wrote {len(df)} interactions to {out}")
     return 0
 
