@@ -43,7 +43,7 @@ except ImportError:
     )
     from core.fastlite_db import ensure_pipeline_schema, get_scraper_db
 
-_RETRIEVAL_CACHE = None
+_RETRIEVAL_CACHE_BY_DB_KEY: dict[str, dict | None] = {}
 _RETRIEVAL_CACHE_LOCK = threading.Lock()
 _TAB_STEP_HREF_RE = re.compile(r"""href\s*=\s*["'](#tab-step(\d+))["']""", re.IGNORECASE)
 _TAB_STEP_ID_RE = re.compile(r"""id\s*=\s*["'](tab-step(\d+))["']""", re.IGNORECASE)
@@ -231,22 +231,36 @@ def _build_retrieval_cache(db):
     }
 
 
+def _db_cache_key(db) -> str:
+    """Return a stable cache key so live and sandbox DBs do not share retrieval caches."""
+    try:
+        rows = list(db.q("PRAGMA database_list"))
+        for row in rows:
+            if str(row.get("name") or "") == "main":
+                db_file = str(row.get("file") or "").strip()
+                if db_file:
+                    return db_file
+    except Exception:
+        pass
+    return f"memory:{id(db)}"
+
+
 def _get_retrieval_cache(db):
-    global _RETRIEVAL_CACHE
-    if _RETRIEVAL_CACHE is not None:
-        return _RETRIEVAL_CACHE
+    key = _db_cache_key(db)
+    if key in _RETRIEVAL_CACHE_BY_DB_KEY:
+        return _RETRIEVAL_CACHE_BY_DB_KEY[key]
     with _RETRIEVAL_CACHE_LOCK:
-        if _RETRIEVAL_CACHE is None:
-            _RETRIEVAL_CACHE = _build_retrieval_cache(db)
-    return _RETRIEVAL_CACHE
+        if key not in _RETRIEVAL_CACHE_BY_DB_KEY:
+            _RETRIEVAL_CACHE_BY_DB_KEY[key] = _build_retrieval_cache(db)
+    return _RETRIEVAL_CACHE_BY_DB_KEY[key]
 
 
 def refresh_retrieval_cache(db):
-    """Rebuild the in-memory hybrid retrieval cache."""
-    global _RETRIEVAL_CACHE
+    """Rebuild the in-memory hybrid retrieval cache for one database only."""
+    key = _db_cache_key(db)
     with _RETRIEVAL_CACHE_LOCK:
-        _RETRIEVAL_CACHE = _build_retrieval_cache(db)
-    return _RETRIEVAL_CACHE
+        _RETRIEVAL_CACHE_BY_DB_KEY[key] = _build_retrieval_cache(db)
+    return _RETRIEVAL_CACHE_BY_DB_KEY[key]
 
 
 def _top_indices(scores: np.ndarray, k: int) -> np.ndarray:

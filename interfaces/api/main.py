@@ -17,14 +17,14 @@ import re
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 try:
-    from core import service
+    from core import service, source_proposals
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.llmapi_retrieval import canonicalize_source_url, extract_tab_step_anchors
@@ -38,7 +38,7 @@ except ImportError:
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    from core import service
+    from core import service, source_proposals
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
     from core.llmapi_retrieval import canonicalize_source_url, extract_tab_step_anchors
@@ -87,6 +87,36 @@ class FeedbackCreate(BaseModel):
     message_id: int
     rating: int
     note: str | None = None
+
+
+class SourceProposalCreate(BaseModel):
+    name: str | None = None
+
+
+class SourceProposalUrlCreate(BaseModel):
+    url: str
+    action: str = "add"
+    site_id: int = 2
+
+
+class SourceProposalRefreshCreate(BaseModel):
+    wait: bool = False
+    site_id: int = 2
+    max_pages: int = 3000
+    crawl_delay: float = 0.1
+    fetch_delay: float = 0.0
+    batch_size: int = 64
+    prune_missing: bool = True
+    prune_missing_after: int = 1
+
+
+class SourceProposalTestQueryCreate(BaseModel):
+    query: str
+    compare_to_live: bool = True
+
+
+class SourceProposalPromoteCreate(BaseModel):
+    site_id: int = 2
 
 
 def _load_llmapi():
@@ -1387,6 +1417,156 @@ def source_preview(
         "url": resolved_url,
         "last_scraped": last_scraped,
         "html": preview_html,
+    }
+
+
+def _source_proposal_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=str(exc).strip("'") or "Source proposal not found")
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc) or "Source proposal operation failed")
+
+
+@api.get("/admin/source-proposals")
+def admin_source_proposals(request: Request, limit: int = 50) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    return {
+        "proposals": source_proposals.list_source_proposals(limit=limit),
+        "admin_user_id": admin_login,
+    }
+
+
+@api.post("/admin/source-proposals")
+def admin_create_source_proposal(payload: SourceProposalCreate, request: Request) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    try:
+        proposal = source_proposals.create_source_proposal(payload.name or "Source test set", admin_login)
+    except Exception as exc:
+        raise _source_proposal_error(exc) from exc
+    return {"proposal": proposal, "admin_user_id": admin_login}
+
+
+@api.get("/admin/source-proposals/{proposal_id}")
+def admin_source_proposal_detail(proposal_id: int, request: Request) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    proposal = source_proposals.get_source_proposal(proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Source proposal not found")
+    return {
+        "proposal": proposal,
+        "urls": source_proposals.list_source_proposal_urls(proposal_id),
+        "admin_user_id": admin_login,
+    }
+
+
+@api.post("/admin/source-proposals/{proposal_id}/urls")
+def admin_source_proposal_url(
+    proposal_id: int,
+    payload: SourceProposalUrlCreate,
+    request: Request,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    action = str(payload.action or "add").strip().lower()
+    try:
+        if action == "add":
+            change = source_proposals.add_source_url(proposal_id, payload.url, admin_login, site_id=payload.site_id)
+        elif action == "remove":
+            change = source_proposals.remove_source_url(proposal_id, payload.url, admin_login, site_id=payload.site_id)
+        else:
+            raise ValueError("action must be 'add' or 'remove'")
+    except Exception as exc:
+        raise _source_proposal_error(exc) from exc
+    return {
+        "change": change,
+        "proposal": source_proposals.get_source_proposal(proposal_id),
+        "urls": source_proposals.list_source_proposal_urls(proposal_id),
+        "admin_user_id": admin_login,
+    }
+
+
+@api.post("/admin/source-proposals/{proposal_id}/refresh")
+def admin_refresh_source_proposal(
+    proposal_id: int,
+    payload: SourceProposalRefreshCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    try:
+        if payload.wait:
+            summary = source_proposals.refresh_source_proposal(
+                proposal_id,
+                site_id=payload.site_id,
+                max_pages=payload.max_pages,
+                crawl_delay=payload.crawl_delay,
+                fetch_delay=payload.fetch_delay,
+                batch_size=payload.batch_size,
+                prune_missing=payload.prune_missing,
+                prune_missing_after=payload.prune_missing_after,
+            )
+            status = "completed"
+        else:
+            source_proposals.queue_source_proposal_refresh(proposal_id)
+            background_tasks.add_task(
+                source_proposals.refresh_source_proposal,
+                proposal_id,
+                site_id=payload.site_id,
+                max_pages=payload.max_pages,
+                crawl_delay=payload.crawl_delay,
+                fetch_delay=payload.fetch_delay,
+                batch_size=payload.batch_size,
+                prune_missing=payload.prune_missing,
+                prune_missing_after=payload.prune_missing_after,
+            )
+            summary = None
+            status = "queued"
+    except Exception as exc:
+        raise _source_proposal_error(exc) from exc
+    return {
+        "status": status,
+        "summary": summary,
+        "proposal": source_proposals.get_source_proposal(proposal_id),
+        "admin_user_id": admin_login,
+    }
+
+
+@api.post("/admin/source-proposals/{proposal_id}/test-query")
+def admin_test_source_proposal_query(
+    proposal_id: int,
+    payload: SourceProposalTestQueryCreate,
+    request: Request,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    try:
+        result = source_proposals.test_source_proposal_query(
+            proposal_id,
+            payload.query,
+            admin_login,
+            compare_to_live=payload.compare_to_live,
+        )
+    except Exception as exc:
+        raise _source_proposal_error(exc) from exc
+    return {"result": result, "admin_user_id": admin_login}
+
+
+@api.post("/admin/source-proposals/{proposal_id}/promote")
+def admin_promote_source_proposal(
+    proposal_id: int,
+    payload: SourceProposalPromoteCreate,
+    request: Request,
+) -> dict[str, object]:
+    admin_login, _ = _require_admin(request)
+    try:
+        result = source_proposals.promote_source_proposal(proposal_id, admin_login, site_id=payload.site_id)
+    except Exception as exc:
+        raise _source_proposal_error(exc) from exc
+    return {
+        "result": result,
+        "proposal": source_proposals.get_source_proposal(proposal_id),
+        "admin_user_id": admin_login,
     }
 
 

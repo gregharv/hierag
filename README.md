@@ -65,12 +65,30 @@ Per-page URL pattern:
 
 - `http://localhost:8510/connections/reference/<doc-slug>`
 
+## Source Test Sets
+
+Admins can create isolated source-test sandboxes from the client under `Source tests`. Each sandbox copies only `data/scraper.db`, not chat/user data, so admins can add/remove URLs, queue a sandbox refresh, compare live vs sandbox answers, and promote approved URL changes without touching live answers prematurely. Sandbox files default to `data/source_sandboxes/`; override with `HIERAG_SOURCE_SANDBOX_DIR`.
+
+Promotion applies URL additions/removals to the live scraper database. Newly added pages affect answers after the next live refresh.
+
 ## Nightly Connections Refresh
 
-Run refresh manually:
+Run live refresh manually:
 
 ```bash
 uv run python -m core.daily_connections_refresh --site-id 2 --max-pages 3000 --prune-missing --prune-missing-after 1 --prune-status-codes 404,410
+```
+
+Refresh active source-test sandbox databases manually:
+
+```bash
+uv run python -m core.refresh_source_proposals --site-id 2 --max-pages 3000
+```
+
+Refresh only sandboxes explicitly queued from the admin UI:
+
+```bash
+uv run python -m core.refresh_source_proposals --queued-only --site-id 2 --max-pages 3000
 ```
 
 Windows scheduler script:

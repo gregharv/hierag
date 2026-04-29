@@ -41,7 +41,7 @@ def refresh_retrieval_cache():
     return _refresh_retrieval_cache(db)
 
 
-def answer_query_with_context(query, top_k=10, max_extracts=6, history=None):
+def answer_query_with_context(query, top_k=10, max_extracts=6, history=None, use_answer_cache=True):
     """Compatibility wrapper preserving previous call signature."""
     return _answer_query_with_context(
         db,
@@ -49,10 +49,11 @@ def answer_query_with_context(query, top_k=10, max_extracts=6, history=None):
         top_k=top_k,
         max_extracts=max_extracts,
         history=history,
+        use_answer_cache=use_answer_cache,
     )
 
 
-def stream_answer_with_context(query, top_k=10, max_extracts=6, history=None):
+def stream_answer_with_context(query, top_k=10, max_extracts=6, history=None, use_answer_cache=True):
     """Compatibility wrapper preserving previous call signature."""
     return _stream_answer_with_context(
         db,
@@ -60,6 +61,7 @@ def stream_answer_with_context(query, top_k=10, max_extracts=6, history=None):
         top_k=top_k,
         max_extracts=max_extracts,
         history=history,
+        use_answer_cache=use_answer_cache,
     )
 
 

@@ -149,6 +149,53 @@ APP_TABLE_DEFS: dict[str, dict[str, Any]] = {
         "foreign_keys": [("message_id", "messages"), ("user_id", "users")],
         "indexes": [{"columns": ["message_id"]}, {"columns": ["user_id", "created_at"]}],
     },
+    "source_proposals": {
+        "columns": {
+            "id": int,
+            "name": str,
+            "status": str,
+            "created_by": str,
+            "created_at": str,
+            "updated_at": str,
+            "sandbox_db_path": str,
+            "base_live_db_path": str,
+            "last_refresh_started_at": str,
+            "last_refresh_finished_at": str,
+            "last_refresh_summary_json": str,
+            "error": str,
+        },
+        "pk": "id",
+        "indexes": [{"columns": ["status"]}, {"columns": ["created_at"]}],
+    },
+    "source_proposal_urls": {
+        "columns": {
+            "id": int,
+            "proposal_id": int,
+            "url": str,
+            "action": str,
+            "created_by": str,
+            "created_at": str,
+        },
+        "pk": "id",
+        "foreign_keys": [("proposal_id", "source_proposals")],
+        "indexes": [{"columns": ["proposal_id", "created_at"]}, {"columns": ["url"]}],
+    },
+    "source_proposal_test_queries": {
+        "columns": {
+            "id": int,
+            "proposal_id": int,
+            "query": str,
+            "live_answer": str,
+            "sandbox_answer": str,
+            "live_sources_json": str,
+            "sandbox_sources_json": str,
+            "created_by": str,
+            "created_at": str,
+        },
+        "pk": "id",
+        "foreign_keys": [("proposal_id", "source_proposals")],
+        "indexes": [{"columns": ["proposal_id", "created_at"]}],
+    },
 }
 
 

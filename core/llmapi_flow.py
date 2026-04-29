@@ -869,7 +869,7 @@ def rewrite_query_with_history(query: str, history: list[dict] | None = None) ->
     }
 
 
-def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None):
+def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None, use_answer_cache=True):
     """Compatibility wrapper that collects text and sources from the streaming path."""
     text_parts: list[str] = []
     sources: list[dict] = []
@@ -879,6 +879,7 @@ def answer_query_with_context(db, query, top_k=10, max_extracts=6, history=None)
         top_k=top_k,
         max_extracts=max_extracts,
         history=history,
+        use_answer_cache=use_answer_cache,
     ):
         etype = event.get("type")
         if etype == "delta":
@@ -968,7 +969,7 @@ def _stream_llm_with_prefix_guard(client: OpenAI, system_text: str, user_text: s
     return {"text": "".join(response_parts), "idk_prefix": idk_prefix}
 
 
-def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None) -> Generator[Dict, None, None]:
+def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None, use_answer_cache=True) -> Generator[Dict, None, None]:
     """Stream LLM response as deltas plus sources/debug events."""
     t0 = time.perf_counter()
     original_query = str(query or "").strip()
@@ -982,10 +983,10 @@ def stream_answer_with_context(db, query, top_k=10, max_extracts=6, history=None
 
     cache_lookup_order = [original_query]
     cache_hit_query = None
-    cached = app_db.get_cache_answer(original_query)
+    cached = app_db.get_cache_answer(original_query) if use_answer_cache else None
     if cached:
         cache_hit_query = original_query
-    elif _query_changed(original_query, effective_query):
+    elif use_answer_cache and _query_changed(original_query, effective_query):
         cache_lookup_order.append(effective_query)
         cached = app_db.get_cache_answer(effective_query)
         if cached:

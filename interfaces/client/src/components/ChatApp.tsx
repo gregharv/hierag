@@ -68,7 +68,7 @@ function clearDebugParam() {
 function parseViewMode() {
   const params = new URLSearchParams(window.location.search);
   const raw = String(params.get("view") || "").trim().toLowerCase();
-  if (raw === "admin-stats" || raw === "admin-review") {
+  if (raw === "admin-stats" || raw === "admin-review" || raw === "admin-sources") {
     return raw;
   }
   return "chat";
@@ -517,6 +517,19 @@ export function ChatApp() {
     error: "",
     data: null,
   });
+  const [sourceProposalState, setSourceProposalState] = useState({
+    loading: false,
+    error: "",
+    proposals: [],
+    selected: null,
+    urls: [],
+  });
+  const [sourceProposalName, setSourceProposalName] = useState("Source test set");
+  const [sourceProposalUrl, setSourceProposalUrl] = useState("");
+  const [sourceProposalUrlAction, setSourceProposalUrlAction] = useState("add");
+  const [sourceProposalBusy, setSourceProposalBusy] = useState(false);
+  const [sourceTestQuery, setSourceTestQuery] = useState("");
+  const [sourceTestResult, setSourceTestResult] = useState(null);
   const [statsFilters, setStatsFilters] = useState({
     range: "30d",
     start: "",
@@ -743,6 +756,193 @@ export function ChatApp() {
       });
     }
   }, [apiFetch, reviewFilters]);
+
+  const loadSourceProposalDetail = useCallback(
+    async (proposalId) => {
+      if (!proposalId) return null;
+      const res = await apiFetch(`/admin/source-proposals/${proposalId}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to load source test set");
+      }
+      const data = await res.json();
+      setSourceProposalState((prev) => ({
+        ...prev,
+        selected: data.proposal || null,
+        urls: data.urls || [],
+      }));
+      return data;
+    },
+    [apiFetch]
+  );
+
+  const loadSourceProposals = useCallback(async () => {
+    setSourceProposalState((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await apiFetch("/admin/source-proposals");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to load source test sets");
+      }
+      const data = await res.json();
+      const proposals = data.proposals || [];
+      const selectedId = sourceProposalState.selected?.id || proposals[0]?.id || null;
+      setSourceProposalState((prev) => ({
+        ...prev,
+        loading: false,
+        error: "",
+        proposals,
+        selected: selectedId ? prev.selected : null,
+        urls: selectedId ? prev.urls : [],
+      }));
+      if (selectedId) {
+        await loadSourceProposalDetail(selectedId);
+      }
+    } catch (error) {
+      setSourceProposalState((prev) => ({
+        ...prev,
+        loading: false,
+        error: error?.message || "Failed to load source test sets",
+      }));
+    }
+  }, [apiFetch, loadSourceProposalDetail, sourceProposalState.selected?.id]);
+
+  const createSourceProposal = useCallback(async () => {
+    setSourceProposalBusy(true);
+    setSourceTestResult(null);
+    try {
+      const res = await apiFetch("/admin/source-proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: sourceProposalName || "Source test set" }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to create source test set");
+      }
+      const data = await res.json();
+      setSourceProposalState((prev) => ({
+        ...prev,
+        error: "",
+        selected: data.proposal || null,
+        proposals: [data.proposal, ...prev.proposals.filter((p) => p.id !== data.proposal?.id)].filter(Boolean),
+        urls: [],
+      }));
+    } catch (error) {
+      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to create source test set" }));
+    } finally {
+      setSourceProposalBusy(false);
+    }
+  }, [apiFetch, sourceProposalName]);
+
+  const submitSourceProposalUrl = useCallback(async () => {
+    const proposalId = sourceProposalState.selected?.id;
+    const url = sourceProposalUrl.trim();
+    if (!proposalId || !url) return;
+    setSourceProposalBusy(true);
+    setSourceTestResult(null);
+    try {
+      const res = await apiFetch(`/admin/source-proposals/${proposalId}/urls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, action: sourceProposalUrlAction }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to update source URL");
+      }
+      const data = await res.json();
+      setSourceProposalUrl("");
+      setSourceProposalState((prev) => ({
+        ...prev,
+        error: "",
+        selected: data.proposal || prev.selected,
+        urls: data.urls || prev.urls,
+      }));
+      loadSourceProposals();
+    } catch (error) {
+      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to update source URL" }));
+    } finally {
+      setSourceProposalBusy(false);
+    }
+  }, [apiFetch, loadSourceProposals, sourceProposalState.selected?.id, sourceProposalUrl, sourceProposalUrlAction]);
+
+  const refreshSourceProposal = useCallback(async () => {
+    const proposalId = sourceProposalState.selected?.id;
+    if (!proposalId) return;
+    setSourceProposalBusy(true);
+    setSourceTestResult(null);
+    try {
+      const res = await apiFetch(`/admin/source-proposals/${proposalId}/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wait: false }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to queue refresh");
+      }
+      const data = await res.json();
+      setSourceProposalState((prev) => ({ ...prev, error: "", selected: data.proposal || prev.selected }));
+      loadSourceProposals();
+    } catch (error) {
+      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to queue refresh" }));
+    } finally {
+      setSourceProposalBusy(false);
+    }
+  }, [apiFetch, loadSourceProposals, sourceProposalState.selected?.id]);
+
+  const runSourceTestQuery = useCallback(async () => {
+    const proposalId = sourceProposalState.selected?.id;
+    const query = sourceTestQuery.trim();
+    if (!proposalId || !query) return;
+    setSourceProposalBusy(true);
+    setSourceTestResult(null);
+    try {
+      const res = await apiFetch(`/admin/source-proposals/${proposalId}/test-query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, compare_to_live: true }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to test query");
+      }
+      const data = await res.json();
+      setSourceProposalState((prev) => ({ ...prev, error: "" }));
+      setSourceTestResult(data.result || null);
+    } catch (error) {
+      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to test query" }));
+    } finally {
+      setSourceProposalBusy(false);
+    }
+  }, [apiFetch, sourceProposalState.selected?.id, sourceTestQuery]);
+
+  const promoteSourceProposal = useCallback(async () => {
+    const proposalId = sourceProposalState.selected?.id;
+    if (!proposalId) return;
+    const ok = window.confirm("Promote these source URL changes to live? New pages still require the next live refresh before they affect answers.");
+    if (!ok) return;
+    setSourceProposalBusy(true);
+    try {
+      const res = await apiFetch(`/admin/source-proposals/${proposalId}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Failed to promote source test set");
+      }
+      const data = await res.json();
+      setSourceProposalState((prev) => ({ ...prev, error: "", selected: data.proposal || prev.selected }));
+      loadSourceProposals();
+    } catch (error) {
+      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to promote source test set" }));
+    } finally {
+      setSourceProposalBusy(false);
+    }
+  }, [apiFetch, loadSourceProposals, sourceProposalState.selected?.id]);
 
   const createChat = useCallback(async () => {
     const res = await apiFetch("/chats", {
@@ -1221,7 +1421,7 @@ export function ChatApp() {
   }, [apiFetch, authUserId]);
 
   useEffect(() => {
-    if (!profile?.is_admin && (viewMode === "admin-stats" || viewMode === "admin-review")) {
+    if (!profile?.is_admin && (viewMode === "admin-stats" || viewMode === "admin-review" || viewMode === "admin-sources")) {
       setViewMode("chat");
       setViewParam("chat");
       setReviewMessageId(null);
@@ -1354,6 +1554,11 @@ export function ChatApp() {
   }, [authUserId, profile, viewMode, loadAdminReview]);
 
   useEffect(() => {
+    if (!authUserId || !profile?.is_admin || viewMode !== "admin-sources") return;
+    loadSourceProposals();
+  }, [authUserId, profile, viewMode, loadSourceProposals]);
+
+  useEffect(() => {
     if (!authUserId || !profile?.is_admin || viewMode !== "admin-review" || !reviewMessageId) {
       if (!reviewMessageId) {
         setAdminDetailState({ loading: false, error: "", data: null });
@@ -1413,6 +1618,8 @@ export function ChatApp() {
     setAdminStatsState({ loading: false, error: "", data: null });
     setAdminReviewState({ loading: false, error: "", data: null });
     setAdminDetailState({ loading: false, error: "", data: null });
+    setSourceProposalState({ loading: false, error: "", proposals: [], selected: null, urls: [] });
+    setSourceTestResult(null);
     setViewParam("chat");
     setReviewMessageParam(null);
     clearDebugParam();
@@ -1528,6 +1735,13 @@ export function ChatApp() {
               onClick={() => openView("admin-review")}
             >
               Interaction review
+            </button>
+            <button
+              className={`btn btn-sm ${viewMode === "admin-sources" ? "btn-primary" : "btn-ghost"}`}
+              type="button"
+              onClick={() => openView("admin-sources")}
+            >
+              Source tests
             </button>
           </>
         ) : null}
@@ -2161,6 +2375,213 @@ export function ChatApp() {
                     </div>
                   ) : null}
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (viewMode === "admin-sources" && canViewAdmin) {
+    const proposals = sourceProposalState.proposals || [];
+    const selected = sourceProposalState.selected || null;
+    const urls = sourceProposalState.urls || [];
+    const liveResult = sourceTestResult?.live || null;
+    const sandboxResult = sourceTestResult?.sandbox || null;
+
+    const renderResultSources = (sources) => {
+      const normalized = normalizeMessageSources(sources || []);
+      if (!normalized.length) {
+        return <span className="text-sm opacity-70">No sources returned.</span>;
+      }
+      return (
+        <div className="flex flex-wrap gap-2">
+          {normalized.map((source, idx) => (
+            <a
+              key={`${source.canonical_key}-${idx}`}
+              href={source.link}
+              target="_blank"
+              rel="noreferrer"
+              className="badge badge-outline gap-1 py-3 px-2 text-xs leading-tight"
+              title={sourceHoverTitle(source)}
+            >
+              {source.label}
+            </a>
+          ))}
+        </div>
+      );
+    };
+
+    return (
+      <div className="min-h-screen bg-base-200">
+        {renderPrimaryHeader("Source Test Sets")}
+        <div className="p-4 md:p-6">
+          <div className="mx-auto max-w-7xl space-y-4">
+            <div className="card bg-base-100 border border-base-300 shadow-sm">
+              <div className="card-body gap-4">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="form-control grow min-w-72">
+                    <span className="label-text text-sm">New test set name</span>
+                    <input
+                      className="input input-bordered"
+                      value={sourceProposalName}
+                      onChange={(event) => setSourceProposalName(event.target.value)}
+                      placeholder="Source test set"
+                    />
+                  </label>
+                  <button className="btn btn-primary" type="button" onClick={createSourceProposal} disabled={sourceProposalBusy}>
+                    Create source test set
+                  </button>
+                  <button className="btn" type="button" onClick={loadSourceProposals} disabled={sourceProposalState.loading}>
+                    Refresh list
+                  </button>
+                </div>
+                <p className="text-sm opacity-70">
+                  Each test set copies the live scraper database into an isolated sandbox. URL edits, refreshes, and test queries here do not change live answers until you promote.
+                </p>
+              </div>
+            </div>
+
+            {sourceProposalState.loading ? <div className="alert"><span>Loading source test sets...</span></div> : null}
+            {sourceProposalState.error ? <div className="alert alert-error"><span>{sourceProposalState.error}</span></div> : null}
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]">
+              <div className="card bg-base-100 border border-base-300 shadow-sm">
+                <div className="card-body">
+                  <h2 className="card-title text-base">Test sets</h2>
+                  <div className="space-y-2">
+                    {proposals.map((proposal) => (
+                      <button
+                        key={proposal.id}
+                        className={`btn btn-sm w-full justify-start ${selected?.id === proposal.id ? "btn-primary" : "btn-ghost"}`}
+                        type="button"
+                        onClick={() => loadSourceProposalDetail(proposal.id)}
+                      >
+                        <span className="truncate">#{proposal.id} {proposal.name}</span>
+                        <span className="badge badge-sm ml-auto">{proposal.status}</span>
+                      </button>
+                    ))}
+                    {!sourceProposalState.loading && proposals.length === 0 ? (
+                      <p className="text-sm opacity-70">No source test sets yet.</p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="card bg-base-100 border border-base-300 shadow-sm">
+                  <div className="card-body gap-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h2 className="card-title text-base">{selected ? selected.name : "Select a test set"}</h2>
+                        {selected ? (
+                          <div className="mt-1 flex flex-wrap gap-2 text-sm">
+                            <span className="badge badge-outline">#{selected.id}</span>
+                            <span className="badge">{selected.status}</span>
+                            <span className="opacity-70">URLs changed: {selected.url_count || urls.length || 0}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                      {selected ? (
+                        <div className="flex flex-wrap gap-2">
+                          <button className="btn btn-sm" type="button" onClick={refreshSourceProposal} disabled={sourceProposalBusy}>
+                            Queue sandbox refresh
+                          </button>
+                          <button className="btn btn-sm btn-success" type="button" onClick={promoteSourceProposal} disabled={sourceProposalBusy || !urls.length || selected.status === "promoted"}>
+                            Promote URL changes
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {selected?.last_refresh_finished_at ? (
+                      <p className="text-sm opacity-70">Last sandbox refresh: {formatMessageDateTime(selected.last_refresh_finished_at)}</p>
+                    ) : null}
+                    {selected?.error ? <div className="alert alert-error"><span>{selected.error}</span></div> : null}
+                  </div>
+                </div>
+
+                {selected ? (
+                  <>
+                    <div className="card bg-base-100 border border-base-300 shadow-sm">
+                      <div className="card-body gap-4">
+                        <h2 className="card-title text-base">Add or remove sandbox source URL</h2>
+                        <div className="flex flex-wrap items-end gap-3">
+                          <label className="form-control">
+                            <span className="label-text text-sm">Action</span>
+                            <select className="select select-bordered" value={sourceProposalUrlAction} onChange={(event) => setSourceProposalUrlAction(event.target.value)}>
+                              <option value="add">Add</option>
+                              <option value="remove">Remove</option>
+                            </select>
+                          </label>
+                          <label className="form-control grow min-w-72">
+                            <span className="label-text text-sm">URL</span>
+                            <input
+                              className="input input-bordered"
+                              value={sourceProposalUrl}
+                              onChange={(event) => setSourceProposalUrl(event.target.value)}
+                              placeholder="https://connections/?docs=..."
+                            />
+                          </label>
+                          <button className="btn btn-primary" type="button" onClick={submitSourceProposalUrl} disabled={sourceProposalBusy || !sourceProposalUrl.trim()}>
+                            Save URL change
+                          </button>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="table table-sm">
+                            <thead><tr><th>Action</th><th>URL</th><th>When</th><th>By</th></tr></thead>
+                            <tbody>
+                              {urls.map((row) => (
+                                <tr key={row.id}>
+                                  <td><span className={`badge ${row.action === "remove" ? "badge-error" : "badge-success"}`}>{row.action}</span></td>
+                                  <td className="max-w-xl whitespace-normal break-all">{row.url}</td>
+                                  <td>{formatMessageDateTime(row.created_at || "")}</td>
+                                  <td>{row.created_by || "-"}</td>
+                                </tr>
+                              ))}
+                              {urls.length === 0 ? <tr><td colSpan={4} className="opacity-70">No URL changes recorded.</td></tr> : null}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="card bg-base-100 border border-base-300 shadow-sm">
+                      <div className="card-body gap-4">
+                        <h2 className="card-title text-base">Compare a test query</h2>
+                        <div className="flex flex-wrap items-end gap-3">
+                          <label className="form-control grow min-w-72">
+                            <span className="label-text text-sm">Question</span>
+                            <input
+                              className="input input-bordered"
+                              value={sourceTestQuery}
+                              onChange={(event) => setSourceTestQuery(event.target.value)}
+                              placeholder="Ask a Connections question to compare live vs sandbox"
+                            />
+                          </label>
+                          <button className="btn btn-primary" type="button" onClick={runSourceTestQuery} disabled={sourceProposalBusy || !sourceTestQuery.trim()}>
+                            Run comparison
+                          </button>
+                        </div>
+                        {sourceProposalBusy ? <div className="text-sm opacity-70">Working...</div> : null}
+                        {sourceTestResult ? (
+                          <div className="grid gap-4 lg:grid-cols-2">
+                            <div className="rounded-box border border-base-300 p-3">
+                              <h3 className="font-semibold mb-2">Live answer</h3>
+                              <pre className="debug-pre min-h-32">{liveResult?.answer || "-"}</pre>
+                              <div className="mt-3"><div className="text-sm font-medium mb-2">Sources</div>{renderResultSources(liveResult?.sources || [])}</div>
+                            </div>
+                            <div className="rounded-box border border-base-300 p-3">
+                              <h3 className="font-semibold mb-2">Sandbox answer</h3>
+                              <pre className="debug-pre min-h-32">{sandboxResult?.answer || "-"}</pre>
+                              <div className="mt-3"><div className="text-sm font-medium mb-2">Sources</div>{renderResultSources(sandboxResult?.sources || [])}</div>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>

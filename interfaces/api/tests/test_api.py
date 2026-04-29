@@ -83,6 +83,7 @@ def client(tmp_path, monkeypatch):
     scraper_db_path = tmp_path / "test_scraper.db"
     monkeypatch.setenv("HIERAG_APP_DB_PATH", str(db_path))
     monkeypatch.setenv("HIERAG_SCRAPER_DB_PATH", str(scraper_db_path))
+    monkeypatch.setenv("HIERAG_SOURCE_SANDBOX_DIR", str(tmp_path / "source_sandboxes"))
     monkeypatch.setenv("HIERAG_URL_CLEANUP_ON_STARTUP", "0")
     monkeypatch.setenv("HIERAG_RENDER_DOCS_ON_STARTUP", "0")
 
@@ -865,3 +866,78 @@ def test_admin_custom_datetime_filters_align_with_asked_column_time_zone(client:
     assert len(interactions) == 1
     assert interactions[0]["user_id"] == "5555EE"
     assert interactions[0]["asked_at"] == asked_at_utc
+
+
+def test_admin_source_proposal_create_add_and_promote(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    create_response = client.post(
+        "/api/admin/source-proposals",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"name": "Try new sources"},
+    )
+    assert create_response.status_code == 200
+    proposal = create_response.json()["proposal"]
+    assert proposal["status"] == "draft"
+    assert Path(proposal["sandbox_db_path"]).exists()
+
+    add_response = client.post(
+        f"/api/admin/source-proposals/{proposal['id']}/urls",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"url": "https://connections/?docs=residential/new-topic", "action": "add"},
+    )
+    assert add_response.status_code == 200
+    assert add_response.json()["change"]["action"] == "add"
+    assert add_response.json()["change"]["url"] == "https://connections/?docs=residential/new-topic"
+
+    detail_response = client.get(
+        f"/api/admin/source-proposals/{proposal['id']}",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+    )
+    assert detail_response.status_code == 200
+    assert detail_response.json()["proposal"]["url_count"] == 1
+    assert detail_response.json()["urls"][0]["action"] == "add"
+
+    promote_response = client.post(
+        f"/api/admin/source-proposals/{proposal['id']}/promote",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={},
+    )
+    assert promote_response.status_code == 200
+    payload = promote_response.json()
+    assert payload["proposal"]["status"] == "promoted"
+    assert payload["result"]["applied"]["add"] == 1
+    assert payload["result"]["live_refresh_required"] is True
+
+    from core.fastlite_db import bootstrap_scraper_db
+
+    db = bootstrap_scraper_db(seed=False)
+    rows = list(db.t.discovered_urls.rows_where("url=?", ["https://connections/?docs=residential/new-topic"], limit=1))
+    assert rows and rows[0]["site_id"] == 2
+
+
+def test_admin_source_proposals_require_admin(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    response = client.get(
+        "/api/admin/source-proposals",
+        headers=auth_headers("1234AB", "1.1.1.1"),
+    )
+    assert response.status_code == 403
+
+
+def test_admin_source_proposal_rejects_invalid_url(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    proposal = client.post(
+        "/api/admin/source-proposals",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"name": "Invalid url check"},
+    ).json()["proposal"]
+
+    response = client.post(
+        f"/api/admin/source-proposals/{proposal['id']}/urls",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"url": "https://example.com/not-allowed", "action": "add"},
+    )
+    assert response.status_code == 400
