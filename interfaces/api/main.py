@@ -14,7 +14,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import re
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
@@ -25,12 +27,13 @@ try:
     from core import service
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
-    from core.llmapi_retrieval import extract_tab_step_anchors
+    from core.llmapi_retrieval import canonicalize_source_url, extract_tab_step_anchors
     from core.llmapi_shared import (
         SOURCE_MIN_BM25_SCORE_RAW,
         SOURCE_MIN_VECTOR_SCORE_RAW,
     )
     from core.release_info import get_release_info
+    from core.site_config import get_site_config
 except ImportError:
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
@@ -38,12 +41,13 @@ except ImportError:
     from core import service
     from core.cleanup_pages_urls import apply_pages_actions, plan_pages_cleanup
     from core.fastlite_db import bootstrap_scraper_db
-    from core.llmapi_retrieval import extract_tab_step_anchors
+    from core.llmapi_retrieval import canonicalize_source_url, extract_tab_step_anchors
     from core.llmapi_shared import (
         SOURCE_MIN_BM25_SCORE_RAW,
         SOURCE_MIN_VECTOR_SCORE_RAW,
     )
     from core.release_info import get_release_info
+    from core.site_config import get_site_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "interfaces" / "client" / "dist"
@@ -58,6 +62,8 @@ _SCRAPER_DB = None
 _TAB_STEP_FRAGMENT_RE = re.compile(r"#tab-step(\d+)\b", re.IGNORECASE)
 _LOGIN_CODE_RE = re.compile(r"^[A-Z0-9]{5,7}$")
 _STREAM_ERROR_FALLBACK = "I hit a temporary problem generating a response. Please try again."
+_SOURCE_PREVIEW_MAX_EXTRACT_CHARS = 5000
+_SOURCE_PREVIEW_MAX_HTML_BYTES = 650_000
 logger = logging.getLogger(__name__)
 
 
@@ -797,6 +803,241 @@ def _serve_connections_docs(doc_path: str):
     raise HTTPException(status_code=404, detail="Documentation page not found")
 
 
+def _source_docs_path(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return ""
+    docs_values = parse_qs(parsed.query).get("docs") or []
+    if not docs_values:
+        return ""
+    decoded = unquote(str(docs_values[0] or "")).strip().strip("/")
+    return decoded.lower()
+
+
+def _source_lookup_candidates(raw_url: str) -> list[str]:
+    value = str(raw_url or "").strip()
+    if not value:
+        return []
+
+    candidates: list[str] = []
+
+    def _add(candidate: object) -> None:
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    _add(value)
+    _add(unquote(value))
+
+    for current in list(candidates):
+        try:
+            _add(canonicalize_source_url(current))
+        except Exception:
+            continue
+
+    return candidates
+
+
+def _find_source_page_row(db, raw_url: str) -> dict | None:
+    for candidate in _source_lookup_candidates(raw_url):
+        rows = list(db.t.pages.rows_where("url=?", [candidate], limit=1))
+        if rows:
+            return rows[0]
+
+    docs_path = _source_docs_path(raw_url)
+    if not docs_path:
+        return None
+
+    like_patterns = [
+        f"%docs={quote(docs_path, safe='/-._~')}%",
+        f"%docs={docs_path}%",
+    ]
+    for pattern in like_patterns:
+        rows = list(
+            db.q(
+                """
+                SELECT id, site_id, url, html, last_scraped
+                FROM pages
+                WHERE url LIKE ?
+                ORDER BY last_scraped DESC
+                LIMIT 40
+                """,
+                [pattern],
+            )
+        )
+        for row in rows:
+            if _source_docs_path(str(row.get("url") or "")) == docs_path:
+                return row
+
+    return None
+
+
+def _remove_display_none(style_value: str) -> str:
+    value = str(style_value or "")
+    if not value:
+        return ""
+    parts = [part.strip() for part in value.split(";") if part.strip()]
+    kept = [part for part in parts if not part.lower().startswith("display:")]
+    return "; ".join(kept)
+
+
+def _linearize_kadence_step_tabs(container, soup: BeautifulSoup) -> None:
+    if container is None:
+        return
+
+    for tabs_block in container.select(".wp-block-kadence-tabs"):
+        title_nodes = list(tabs_block.select(".kt-tabs-title-list [id^='tab-step']"))
+        labels = [node.get_text(" ", strip=True) for node in title_nodes]
+
+        content_wrap = tabs_block.select_one(".kt-tabs-content-wrap")
+        if content_wrap is None:
+            continue
+
+        panels = [
+            child
+            for child in content_wrap.find_all(recursive=False)
+            if getattr(child, "name", "") and str(child.name).lower() == "div"
+        ]
+        if not panels:
+            continue
+
+        title_list = tabs_block.select_one(".kt-tabs-title-list")
+        if title_list is not None:
+            title_list.decompose()
+
+        for idx, panel in enumerate(panels, start=1):
+            panel.attrs.pop("hidden", None)
+            cleaned_style = _remove_display_none(str(panel.get("style") or ""))
+            if cleaned_style:
+                panel["style"] = cleaned_style
+            else:
+                panel.attrs.pop("style", None)
+
+            label = labels[idx - 1] if idx - 1 < len(labels) else f"Step {idx}"
+            if label:
+                heading = soup.new_tag("h3")
+                heading.string = label
+                panel.insert(0, heading)
+
+
+def _extract_source_preview_html(page_row: dict) -> tuple[str, str]:
+    raw_html = str(page_row.get("html") or "").strip()
+    if not raw_html:
+        return "", ""
+
+    soup = BeautifulSoup(raw_html, "lxml")
+    site_id = _coerce_non_negative_int(page_row.get("site_id"), default=0)
+    site_config = get_site_config(site_id) if site_id else None
+    selector = str((site_config or {}).get("selector") or "").strip()
+
+    container = soup.select_one(selector) if selector else None
+    if container is None:
+        container = soup.select_one("main") or soup.select_one("article") or soup.body
+    if container is None:
+        container = soup
+
+    for blocked in container.select("script,style,noscript,iframe,form,button"):
+        blocked.decompose()
+
+    _linearize_kadence_step_tabs(container, soup)
+
+    for tag in container.find_all(True):
+        for attr_name in list(tag.attrs):
+            if str(attr_name).lower().startswith("on"):
+                del tag.attrs[attr_name]
+
+    for anchor in container.select("a[href]"):
+        href = str(anchor.get("href") or "").strip()
+        if href.lower().startswith("javascript:"):
+            anchor.attrs.pop("href", None)
+            continue
+        anchor["target"] = "_blank"
+        anchor["rel"] = "noreferrer"
+
+    title = ""
+    if soup.title:
+        title = soup.title.get_text(" ", strip=True)
+    if not title:
+        title = str(page_row.get("url") or "Source preview").strip()
+
+    return title, str(container)
+
+
+def _extract_text_for_source_page(db, page_id: int, extract_id: int | None) -> str:
+    if extract_id is None:
+        return ""
+
+    try:
+        rows = list(db.t.extracts.rows_where("id=?", [int(extract_id)], limit=1))
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+
+    row = rows[0]
+    if int(row.get("page_id") or 0) != int(page_id):
+        return ""
+
+    text = str(row.get("text") or "").strip()
+    if len(text) > _SOURCE_PREVIEW_MAX_EXTRACT_CHARS:
+        text = f"{text[:_SOURCE_PREVIEW_MAX_EXTRACT_CHARS].rstrip()}…"
+    return text
+
+
+def _build_source_preview_document(
+    *,
+    title: str,
+    source_url: str,
+    last_scraped: str,
+    content_html: str,
+    extract_text: str,
+) -> str:
+    safe_title = html.escape(str(title or "Source preview"))
+    safe_url = html.escape(str(source_url or ""), quote=True)
+    safe_url_text = html.escape(str(source_url or ""))
+    safe_last_scraped = html.escape(str(last_scraped or "unknown"))
+
+    body_html = content_html or "<p>No stored HTML content is available for this source.</p>"
+    if len(body_html.encode("utf-8")) > _SOURCE_PREVIEW_MAX_HTML_BYTES:
+        body_html = (
+            "<p>This source snapshot is large, so only metadata is shown here.</p>"
+            f"<p><a href=\"{safe_url}\" target=\"_blank\" rel=\"noreferrer\">Open source in a new tab</a></p>"
+        )
+
+    _ = extract_text  # kept for backward compatibility; excerpt block intentionally hidden
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'/>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+        f"<title>{safe_title}</title>"
+        f"<base href='{safe_url}'/>"
+        "<style>"
+        "body{margin:0;background:#f5f6f8;color:#111827;font-family:Inter,Segoe UI,Arial,sans-serif;}"
+        ".shell{max-width:1080px;margin:0 auto;padding:16px 20px 28px;}"
+        ".meta{background:#fff;border:1px solid #d1d5db;border-radius:10px;padding:12px 14px;margin-bottom:14px;}"
+        ".meta h1{margin:0 0 6px;font-size:18px;line-height:1.35;}"
+        ".meta p{margin:2px 0;font-size:12px;color:#4b5563;}"
+        ".meta a{color:#1d4ed8;text-decoration:none;word-break:break-all;}"
+        ".meta a:hover{text-decoration:underline;}"
+        ".content{background:#fff;border:1px solid #d1d5db;border-radius:10px;padding:16px;overflow:auto;}"
+        ".content a{color:#1d4ed8;}"
+        ".content img{max-width:100%;height:auto;}"
+        "</style></head><body>"
+        "<div class='shell'>"
+        "<header class='meta'>"
+        f"<h1>{safe_title}</h1>"
+        f"<p><strong>Source:</strong> <a href='{safe_url}' target='_blank' rel='noreferrer'>{safe_url_text}</a></p>"
+        f"<p><strong>Last scraped:</strong> {safe_last_scraped}</p>"
+        "</header>"
+        f"<main class='content'>{body_html}</main>"
+        "</div></body></html>"
+    )
+
+
 app = FastAPI(title="hierag-api")
 
 app.add_middleware(
@@ -1101,6 +1342,51 @@ def get_message_debug(message_id: int, request: Request) -> dict[str, object]:
         "chat_id": msg["chat_id"],
         "created_at": msg.get("created_at"),
         "debug": debug,
+    }
+
+
+@api.get("/sources/preview")
+def source_preview(
+    request: Request,
+    url: str,
+    extract_id: int | None = None,
+) -> dict[str, str]:
+    _ = _user_id(request)
+
+    source_url = str(url or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail="Source URL is required")
+
+    try:
+        db = _get_scraper_db()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Scraper DB unavailable: {exc}") from exc
+
+    page_row = _find_source_page_row(db, source_url)
+    if not page_row:
+        raise HTTPException(status_code=404, detail="Source snapshot not found in scraper.db")
+
+    page_id = _coerce_non_negative_int(page_row.get("id"), default=0)
+    title, content_html = _extract_source_preview_html(page_row)
+    if not content_html:
+        raise HTTPException(status_code=404, detail="Source snapshot is missing HTML content")
+
+    extract_text = _extract_text_for_source_page(db, page_id, extract_id)
+    resolved_url = str(page_row.get("url") or source_url).strip()
+    last_scraped = str(page_row.get("last_scraped") or "").strip()
+    preview_html = _build_source_preview_document(
+        title=title,
+        source_url=resolved_url,
+        last_scraped=last_scraped,
+        content_html=content_html,
+        extract_text=extract_text,
+    )
+
+    return {
+        "title": title,
+        "url": resolved_url,
+        "last_scraped": last_scraped,
+        "html": preview_html,
     }
 
 

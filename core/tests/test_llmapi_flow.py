@@ -635,6 +635,8 @@ def test_build_llm_prompt_includes_allowed_source_links_and_markdown_rule():
     assert "[text](url)" in system_text
     assert "only with URLs listed under Allowed source links" in system_text
     assert "Do not include a separate links section." in system_text
+    assert "<details>" in system_text
+    assert "long step list" in user_text
 
 
 def test_build_llm_prompt_procedure_mode_no_longer_forces_brevity():

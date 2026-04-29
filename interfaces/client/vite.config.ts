@@ -8,11 +8,13 @@ import { playwright } from '@vitest/browser-playwright';
 const dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(fileURLToPath(import.meta.url));
 
 // More info at: https://storybook.js.org/docs/next/writing-tests/integrations/vitest-addon
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  base: command === "build" ? (process.env.VITE_BASE || "/proxy/8510/") : "/",
   plugins: [react()],
   server: {
     host: "0.0.0.0",
     port: 8301,
+    allowedHosts: ["code.critjecture.com"],
     proxy: {
       "/api": "http://localhost:8510"
     }
@@ -40,4 +42,4 @@ export default defineConfig({
       }
     }]
   }
-});
+}));

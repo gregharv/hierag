@@ -11,13 +11,16 @@ import {
   Trash2,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  `${String(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/api`;
 const CHANGELOG_FALLBACK_HREF = "/connections/reference/changelog";
 const STREAM_ERROR_FALLBACK_MESSAGE =
   "I hit a temporary problem generating a response. Please try again.";
 const CHAT_TIME_ZONE = "America/New_York";
 const ISO_TZ_SUFFIX_RE = /(?:[zZ]|[+\-]\d{2}:\d{2})$/;
 const INLINE_SOURCE_LINKS_MAX = 2;
+const LONG_LIST_COLLAPSE_MIN_ITEMS = 8;
 const SIDEBAR_CHAT_PREVIEW_MAX = 40;
 const SIDEBAR_CHAT_PREVIEW_WORD_BREAK_MIN = 24;
 const USER_ID_MIN_LENGTH = 5;
@@ -290,6 +293,34 @@ function replaceAnchorWithText(anchor) {
   anchor.replaceWith(document.createTextNode(text));
 }
 
+function collapseLongMarkdownLists(wrapper, minItems = LONG_LIST_COLLAPSE_MIN_ITEMS) {
+  if (!wrapper || typeof wrapper.querySelectorAll !== "function") return;
+
+  const lists = Array.from(wrapper.querySelectorAll("ol, ul"));
+  for (const list of lists) {
+    if (!list || !list.parentNode) continue;
+    if (list.closest("details")) continue;
+    if (list.parentElement?.closest("ol, ul")) continue;
+
+    const itemCount = Array.from(list.children || []).filter(
+      (child) => child?.tagName?.toLowerCase() === "li"
+    ).length;
+    if (itemCount < minItems) continue;
+
+    const details = document.createElement("details");
+    details.className = "collapsible-list";
+
+    const summary = document.createElement("summary");
+    summary.textContent = list.tagName.toLowerCase() === "ol"
+      ? `Show ${itemCount} steps`
+      : `Show ${itemCount} items`;
+    details.appendChild(summary);
+
+    list.parentNode.insertBefore(details, list);
+    details.appendChild(list);
+  }
+}
+
 function sanitizeMarkdownAnchorsToSources(wrapper, sources = []) {
   const allowedSources = normalizeMessageSources(sources);
   const allowedKeys = new Set(allowedSources.map((source) => String(source?.canonical_key || "").trim()));
@@ -321,6 +352,7 @@ function renderMarkdownWithSourceLinkBehavior(content, sources = []) {
   }
   const wrapper = document.createElement("div");
   wrapper.innerHTML = html;
+  collapseLongMarkdownLists(wrapper);
   const linkedSourceKeys = sanitizeMarkdownAnchorsToSources(wrapper, sources);
   return { html: wrapper.innerHTML, linkedSourceKeys };
 }
@@ -524,6 +556,15 @@ export function ChatApp() {
   const [releaseInfo, setReleaseInfo] = useState(null);
   const [releaseLoadFailed, setReleaseLoadFailed] = useState(false);
   const [sourceExpandedByMessage, setSourceExpandedByMessage] = useState({});
+  const [sourcePreviewState, setSourcePreviewState] = useState({
+    open: false,
+    loading: false,
+    error: "",
+    title: "",
+    url: "",
+    html: "",
+    lastScraped: "",
+  });
   const [feedbackByMessage, setFeedbackByMessage] = useState({});
   const [negativeFeedbackDraftByMessage, setNegativeFeedbackDraftByMessage] = useState({});
   const [negativeFeedbackPendingByMessage, setNegativeFeedbackPendingByMessage] = useState({});
@@ -859,6 +900,67 @@ export function ChatApp() {
     await submitNegativeFeedback(messageId, "");
   };
 
+  const closeSourcePreview = useCallback(() => {
+    setSourcePreviewState((prev) => ({
+      ...prev,
+      open: false,
+      loading: false,
+      error: "",
+    }));
+  }, []);
+
+  const openSourcePreview = useCallback(
+    async (source) => {
+      const sourceUrl = String(
+        source?.link || source?.url || source?.url_canonical || ""
+      ).trim();
+      if (!sourceUrl) return;
+
+      const sourceTitle = String(source?.label || sourceUrl);
+      setSourcePreviewState({
+        open: true,
+        loading: true,
+        error: "",
+        title: sourceTitle,
+        url: sourceUrl,
+        html: "",
+        lastScraped: String(source?.last_scraped || ""),
+      });
+
+      try {
+        const params = new URLSearchParams({ url: sourceUrl });
+        const extractId = Number(source?.extract_id);
+        if (Number.isFinite(extractId) && extractId > 0) {
+          params.set("extract_id", String(extractId));
+        }
+
+        const response = await apiFetch(`/sources/preview?${params.toString()}`);
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.detail || "Could not load source preview");
+        }
+
+        const payload = await response.json();
+        setSourcePreviewState({
+          open: true,
+          loading: false,
+          error: "",
+          title: String(payload?.title || sourceTitle),
+          url: String(payload?.url || sourceUrl),
+          html: String(payload?.html || ""),
+          lastScraped: String(payload?.last_scraped || source?.last_scraped || ""),
+        });
+      } catch (error) {
+        setSourcePreviewState((prev) => ({
+          ...prev,
+          loading: false,
+          error: error?.message || "Could not load source preview",
+        }));
+      }
+    },
+    [apiFetch]
+  );
+
   const openDebugPage = (messageId) => {
     if (!messageId) return;
     setDebugMessageId(messageId);
@@ -1183,6 +1285,16 @@ export function ChatApp() {
 
   useEffect(() => {
     setSourceExpandedByMessage({});
+    setSourcePreviewState((prev) =>
+      prev.open
+        ? {
+          ...prev,
+          open: false,
+          loading: false,
+          error: "",
+        }
+        : prev
+    );
   }, [activeChatId]);
 
   useEffect(() => {
@@ -1289,6 +1401,15 @@ export function ChatApp() {
     setDebugMessageId(null);
     setMessages([]);
     setChats([]);
+    setSourcePreviewState({
+      open: false,
+      loading: false,
+      error: "",
+      title: "",
+      url: "",
+      html: "",
+      lastScraped: "",
+    });
     setAdminStatsState({ loading: false, error: "", data: null });
     setAdminReviewState({ loading: false, error: "", data: null });
     setAdminDetailState({ loading: false, error: "", data: null });
@@ -2472,7 +2593,19 @@ export function ChatApp() {
                                         ? "bg-amber-100/45 border-black/60 text-base-content"
                                         : "badge-outline"
                                       }`}
-                                    title={sourceHoverTitle(source)}
+                                    title={`${sourceHoverTitle(source)}\nClick to preview in-app. Ctrl/Cmd-click opens a new tab.`}
+                                    onClick={(event) => {
+                                      if (
+                                        event.metaKey ||
+                                        event.ctrlKey ||
+                                        event.shiftKey ||
+                                        event.altKey
+                                      ) {
+                                        return;
+                                      }
+                                      event.preventDefault();
+                                      openSourcePreview(source);
+                                    }}
                                   >
                                     <span
                                       className={`font-medium ${linkedSourceKeySet.has(source.canonical_key) ? "underline" : ""
@@ -2656,6 +2789,68 @@ export function ChatApp() {
           </ul>
         </div>
       </div>
+
+      {sourcePreviewState.open && (
+        <dialog className="modal modal-open">
+          <div className="modal-box max-w-7xl w-11/12 h-[88vh] p-0 overflow-hidden">
+            <div className="flex items-start justify-between gap-3 border-b border-base-300 bg-base-100 p-3">
+              <div className="min-w-0">
+                <h3 className="font-semibold truncate">
+                  {sourcePreviewState.title || "Source preview"}
+                </h3>
+                <p className="text-xs opacity-70 truncate">{sourcePreviewState.url}</p>
+                <p className="text-xs opacity-60">
+                  Last scraped: {formatLastScraped(sourcePreviewState.lastScraped || "")}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  className="btn btn-sm"
+                  href={sourcePreviewState.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open in new tab
+                </a>
+                <button className="btn btn-sm btn-ghost" type="button" onClick={closeSourcePreview}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="h-[calc(88vh-6.25rem)] bg-base-200">
+              {sourcePreviewState.loading ? (
+                <div className="h-full flex items-center justify-center text-sm opacity-70">
+                  Loading source preview...
+                </div>
+              ) : sourcePreviewState.error ? (
+                <div className="h-full flex flex-col items-center justify-center gap-3 p-6 text-center">
+                  <div className="text-error">{sourcePreviewState.error}</div>
+                  <a
+                    className="btn btn-sm"
+                    href={sourcePreviewState.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open source in new tab
+                  </a>
+                </div>
+              ) : (
+                <iframe
+                  title={sourcePreviewState.title || "Source preview"}
+                  className="h-full w-full bg-white"
+                  srcDoc={sourcePreviewState.html}
+                  sandbox="allow-popups allow-popups-to-escape-sandbox"
+                />
+              )}
+            </div>
+          </div>
+          <form method="dialog" className="modal-backdrop">
+            <button type="button" onClick={closeSourcePreview}>
+              close
+            </button>
+          </form>
+        </dialog>
+      )}
 
       {deleteTarget && (
         <dialog className="modal modal-open">

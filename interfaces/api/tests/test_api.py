@@ -194,6 +194,41 @@ def test_startup_docs_render_runs_when_enabled(tmp_path, monkeypatch):
     assert calls["docs_render"] == 1
 
 
+def test_linearize_kadence_step_tabs_removes_tab_header_and_relabels_panels(client: TestClient):
+    import interfaces.api.main as main
+    from bs4 import BeautifulSoup
+
+    html = """
+    <main>
+      <div class="wp-block-kadence-tabs">
+        <ul class="kt-tabs-title-list">
+          <li id="tab-step1">Step 1</li>
+          <li id="tab-step2">Step 2</li>
+        </ul>
+        <div class="kt-tabs-content-wrap">
+          <div class="kt-tab-inner-content" style="display:none; color:red;"><p>First step body</p></div>
+          <div class="kt-tab-inner-content"><p>Second step body</p></div>
+        </div>
+      </div>
+    </main>
+    """
+
+    soup = BeautifulSoup(html, "lxml")
+    container = soup.select_one("main")
+    assert container is not None
+
+    main._linearize_kadence_step_tabs(container, soup)
+
+    assert container.select_one(".kt-tabs-title-list") is None
+    headings = [node.get_text(" ", strip=True) for node in container.select(".kt-tab-inner-content > h3")]
+    assert headings[:2] == ["Step 1", "Step 2"]
+
+    first_panel = container.select_one(".kt-tab-inner-content")
+    assert first_panel is not None
+    style_value = str(first_panel.get("style") or "")
+    assert "display" not in style_value.lower()
+
+
 def test_profile_endpoint(client: TestClient):
     response = client.get("/api/profile", headers=auth_headers("1234AB", "10.1.2.3"))
     assert response.status_code == 200
