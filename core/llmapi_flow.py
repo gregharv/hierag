@@ -328,8 +328,6 @@ def _build_llm_prompt(
         "If helpful, you may include markdown hyperlinks in the form [text](url), "
         "but only with URLs listed under Allowed source links. "
         "Do not include a separate links section. "
-        "For long procedure or checklist lists, put the list in a collapsed HTML "
-        "<details><summary>Show steps</summary>...</details> section. "
         "If the answer is not in the context, say you don't know."
     )
     user_lines = [f"Question: {query}", "", "Context:", context]
@@ -344,7 +342,6 @@ def _build_llm_prompt(
         [
             "",
             "If a link is useful, use markdown [text](url) and only one of the allowed source URLs above.",
-            "If you include a long step list (8 or more items), place it inside a collapsed HTML <details> block with a short <summary>.",
             "Do not add a separate links section.",
         ]
     )
