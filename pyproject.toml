@@ -1,6 +1,6 @@
 [project]
 name = "hierag"
-version = "0.1.10"
+version = "0.1.11"
 description = "Core + interfaces monorepo for Hierag"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

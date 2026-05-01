@@ -12,6 +12,13 @@ This page tracks user-visible updates. Entries are listed newest first.
 - **Why it matters:** User impact or expected behavior difference.
 - **Affected areas:** Main files/components touched.
 
+## v0.1.11
+
+- **Date (UTC):** 2026-05-01
+- **Changed:** Added source viewing/preview support so users can inspect stored source snapshots from source chips, including last-scraped metadata, and tightened source test refreshes to scrape only the URLs added to a test set.
+- **Why it matters:** Users can verify cited source content in-app without triggering broad sandbox scrapes when evaluating a single added source.
+- **Affected areas:** `interfaces/api/main.py`, `interfaces/client/src/components/ChatApp.tsx`, `core/source_proposals.py`, `core/daily_connections_refresh.py`
+
 ## v0.1.10
 
 - **Date (UTC):** 2026-03-04

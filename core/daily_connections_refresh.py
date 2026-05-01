@@ -29,6 +29,57 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
+def _normalize_target_urls(
+    db,
+    site_id: int,
+    raw_urls,
+    *,
+    html_only: bool = True,
+    limit_urls: int | None = None,
+) -> list[str]:
+    site = db.t.sites[site_id]
+    root_url = site.get("root_url") or ""
+    policy = get_crawl_url_policy(site_id)
+    allow_root_seed = bool(policy.get("allow_root_seed", False))
+    kind_by_url = {}
+    for row in db.t.discovered_urls.rows_where("site_id=?", [site_id]):
+        row_canonical = canonicalize_internal_url(
+            row["url"],
+            row["url"],
+            root_url,
+            policy=policy,
+            allow_root=allow_root_seed,
+        )
+        if row_canonical and row_canonical not in kind_by_url:
+            kind_by_url[row_canonical] = (row.get("kind") or "html").lower()
+
+    urls = []
+    seen: set[str] = set()
+    for raw_url in raw_urls:
+        canonical = canonicalize_internal_url(
+            str(raw_url or ""),
+            str(raw_url or ""),
+            root_url,
+            policy=policy,
+            allow_root=allow_root_seed,
+        )
+        if not canonical:
+            continue
+        if html_only and kind_by_url.get(canonical, "html") != "html":
+            continue
+        if policy.get("required_query_key") and "?" not in canonical:
+            # Seed/root URLs are useful for crawl, but skip during fetch/parse/embed.
+            continue
+        if canonical in seen:
+            continue
+        urls.append(canonical)
+        seen.add(canonical)
+
+    if limit_urls is not None and limit_urls >= 0:
+        return urls[:limit_urls]
+    return urls
+
+
 def _target_discovered_urls(
     db,
     site_id: int,
@@ -37,34 +88,14 @@ def _target_discovered_urls(
     limit_urls: int | None = None,
 ) -> list[str]:
     rows = list(db.t.discovered_urls.rows_where("site_id=?", [site_id]))
-    site = db.t.sites[site_id]
-    root_url = site.get("root_url") or ""
-    policy = get_crawl_url_policy(site_id)
-    allow_root_seed = bool(policy.get("allow_root_seed", False))
-
-    urls = []
-    for row in rows:
-        kind = (row.get("kind") or "html").lower()
-        if html_only and kind != "html":
-            continue
-        canonical = canonicalize_internal_url(
-            row["url"],
-            row["url"],
-            root_url,
-            policy=policy,
-            allow_root=allow_root_seed,
-        )
-        if not canonical:
-            continue
-        if policy.get("required_query_key") and "?" not in canonical:
-            # Seed/root URLs are useful for crawl, but skip during fetch/parse/embed.
-            continue
-        urls.append(canonical)
-
-    unique_urls = sorted(set(urls))
-    if limit_urls is not None and limit_urls >= 0:
-        return unique_urls[:limit_urls]
-    return unique_urls
+    urls = sorted({row["url"] for row in rows})
+    return _normalize_target_urls(
+        db,
+        site_id,
+        urls,
+        html_only=html_only,
+        limit_urls=limit_urls,
+    )
 
 
 def _collect_chunk_ids_for_pages(db, page_ids: list[int]) -> list[int]:
@@ -191,6 +222,7 @@ def run_daily_connections_refresh(
     skip_crawl: bool = False,
     html_only: bool = True,
     limit_urls: int | None = None,
+    target_urls: list[str] | tuple[str, ...] | None = None,
     refresh_cache: bool = True,
     scrape_only: bool = False,
     prune_missing: bool = False,
@@ -223,13 +255,23 @@ def run_daily_connections_refresh(
         effective_prune_status_codes = [404, 410]
     effective_prune_status_set = set(effective_prune_status_codes)
     effective_prune_missing_after = max(1, int(prune_missing_after))
+    explicit_target_urls = target_urls is not None
 
-    target_urls = _target_discovered_urls(
-        db,
-        site_id,
-        html_only=html_only,
-        limit_urls=limit_urls,
-    )
+    if target_urls is None:
+        target_urls = _target_discovered_urls(
+            db,
+            site_id,
+            html_only=html_only,
+            limit_urls=limit_urls,
+        )
+    else:
+        target_urls = _normalize_target_urls(
+            db,
+            site_id,
+            target_urls,
+            html_only=html_only,
+            limit_urls=limit_urls,
+        )
     _log(
         f"Discovered URLs before={discovered_before} after={discovered_after} "
         f"new={discovered_new} target_fetch={len(target_urls)}"
@@ -417,6 +459,7 @@ def run_daily_connections_refresh(
         "discovered_final": discovered_final,
         "discovered_pruned": max(0, discovered_after - discovered_final),
         "target_urls": len(target_urls),
+        "target_urls_explicit": explicit_target_urls,
         "fetched_urls_completed": fetched_urls_completed,
         "interrupted": interrupted,
         "interrupted_at_url": interrupted_at_url,

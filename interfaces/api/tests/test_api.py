@@ -40,13 +40,13 @@ def seed_admin_interaction(
         role="user",
         content=question,
         question_norm=service.normalize_question(question),
-        app_version="0.1.10-test",
+        app_version="0.1.11-test",
     )
     assistant_message_id = service.insert_message(
         chat_id=chat_id,
         role="assistant",
         content=answer,
-        app_version="0.1.10-test",
+        app_version="0.1.11-test",
     )
     debug_payload = {
         "query": question,
@@ -914,6 +914,44 @@ def test_admin_source_proposal_create_add_and_promote(client: TestClient, monkey
     db = bootstrap_scraper_db(seed=False)
     rows = list(db.t.discovered_urls.rows_where("url=?", ["https://connections/?docs=residential/new-topic"], limit=1))
     assert rows and rows[0]["site_id"] == 2
+
+
+def test_admin_source_proposal_refresh_only_scrapes_added_urls(client: TestClient, monkeypatch):
+    monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
+
+    create_response = client.post(
+        "/api/admin/source-proposals",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"name": "Refresh one source"},
+    )
+    assert create_response.status_code == 200
+    proposal = create_response.json()["proposal"]
+
+    add_response = client.post(
+        f"/api/admin/source-proposals/{proposal['id']}/urls",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"url": "https://connections/?docs=residential/added-only", "action": "add"},
+    )
+    assert add_response.status_code == 200
+
+    import core.source_proposals as source_proposals
+
+    captured = {}
+
+    def fake_refresh(db, **kwargs):
+        captured.update(kwargs)
+        return {"target_urls": len(kwargs.get("target_urls") or [])}
+
+    monkeypatch.setattr(source_proposals, "run_daily_connections_refresh", fake_refresh)
+
+    refresh_response = client.post(
+        f"/api/admin/source-proposals/{proposal['id']}/refresh",
+        headers=auth_headers("9999ZZ", "9.9.9.9"),
+        json={"wait": True},
+    )
+    assert refresh_response.status_code == 200
+    assert captured["skip_crawl"] is True
+    assert captured["target_urls"] == ["https://connections/?docs=residential/added-only"]
 
 
 def test_admin_source_proposals_require_admin(client: TestClient, monkeypatch):

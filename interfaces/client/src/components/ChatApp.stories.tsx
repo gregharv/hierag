@@ -64,7 +64,7 @@ function createMockFetch(mode = "default") {
   ];
   const seedAssistantSources = mode === "empty-sources" ? [] : defaultSources;
   const streamSources = mode === "empty-sources" ? [] : defaultSources.slice(0, 2);
-  const storyVersion = "0.1.10";
+  const storyVersion = "0.1.11";
   const assistantSeedContent =
     mode === "markdown-links"
       ? `Use [Broken arrangement](${defaultSources[0].url}), [Re-work arrangement](${defaultSources[1].url}), and [Broken arrangement copy](${defaultSources[2].url}). Ignore [non-source link](https://example.com/not-a-source).`

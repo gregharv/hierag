@@ -128,6 +128,20 @@ def list_source_proposal_urls(proposal_id: int) -> list[dict[str, Any]]:
     return rows
 
 
+def _effective_added_source_urls(proposal_id: int, db, site_id: int) -> list[str]:
+    changes = list(service.db.t.source_proposal_urls.rows_where("proposal_id=?", [int(proposal_id)]))
+    changes.sort(key=lambda row: (row.get("created_at") or "", int(row.get("id") or 0)))
+    active: dict[str, None] = {}
+    for change in changes:
+        action = str(change.get("action") or "").strip().lower()
+        canonical = _canonicalize_for_site(db, str(change.get("url") or ""), site_id)
+        if action == "add":
+            active[canonical] = None
+        elif action == "remove":
+            active.pop(canonical, None)
+    return list(active.keys())
+
+
 def create_source_proposal(name: str, created_by: str) -> dict[str, Any]:
     service.create_db_and_tables()
     cleaned_name = " ".join(str(name or "").split()).strip() or "Source test set"
@@ -283,6 +297,7 @@ def refresh_source_proposal(
             }
         )
         db = _open_sandbox_db(proposal)
+        added_urls = _effective_added_source_urls(int(proposal_id), db, int(site_id))
         summary = run_daily_connections_refresh(
             db,
             site_id=int(site_id),
@@ -290,6 +305,8 @@ def refresh_source_proposal(
             crawl_delay=float(crawl_delay),
             fetch_delay=float(fetch_delay),
             batch_size=int(batch_size),
+            skip_crawl=True,
+            target_urls=added_urls,
             refresh_cache=False,
             prune_missing=bool(prune_missing),
             prune_missing_after=int(prune_missing_after),
