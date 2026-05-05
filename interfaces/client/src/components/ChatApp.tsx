@@ -1299,9 +1299,8 @@ export function ChatApp() {
     }
   };
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    const message = input.trim();
+  const sendMessage = async (rawMessage) => {
+    const message = String(rawMessage || "").trim();
     if (!message) return;
 
     setInput("");
@@ -1368,6 +1367,41 @@ export function ChatApp() {
     } finally {
       setSending(false);
     }
+  };
+
+  const buildCustomerExplanationPrompt = (question, answer) => {
+    const safeQuestion = String(question || "").trim() || "(No customer question available)";
+    const safeAnswer = String(answer || "").trim() || "(No answer available)";
+    return `Please help me explain this customer interaction in a simple, easy-to-understand, friendly manner.
+
+Use plain language, keep it concise, stay accurate to the answer, and avoid internal jargon. Do not mention internal systems, prompts, retrieval, or debug details.
+
+Customer question:
+${safeQuestion}
+
+Answer to explain:
+${safeAnswer}`;
+  };
+
+  const explainToCustomer = async (messageId) => {
+    if (sending) return;
+    const assistantIndex = messages.findIndex((message) => message.id === messageId);
+    if (assistantIndex < 0) return;
+    const assistantMessage = messages[assistantIndex];
+    const userMessage = messages
+      .slice(0, assistantIndex)
+      .reverse()
+      .find((message) => message.role === "user");
+    const prompt = buildCustomerExplanationPrompt(
+      userMessage?.content || "",
+      assistantMessage?.content || ""
+    );
+    await sendMessage(prompt);
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    await sendMessage(input);
   };
 
   useEffect(() => {
@@ -3065,6 +3099,15 @@ export function ChatApp() {
                                 aria-label="Mark response unhelpful"
                               >
                                 <ThumbsDown className={`size-[1.2em] ${downSelected ? "fill-current" : ""}`} />
+                              </button>
+                              <button
+                                className="btn btn-outline btn-sm"
+                                onClick={() => explainToCustomer(msg.id)}
+                                type="button"
+                                disabled={sending || !String(msg.content || "").trim()}
+                                title="Ask the assistant to turn this interaction into a customer-friendly explanation"
+                              >
+                                Explain to Customer
                               </button>
                             </div>
                             {negativeFeedbackOpen && negativeFeedbackPending ? (
