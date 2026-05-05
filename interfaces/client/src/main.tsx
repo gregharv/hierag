@@ -3,7 +3,10 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 
 import App from "./App";
+import { applySavedTheme } from "./components/ThemeDropdown";
 import "./styles.css";
+
+applySavedTheme();
 
 const queryClient = new QueryClient();
 

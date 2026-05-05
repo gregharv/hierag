@@ -11,6 +11,8 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { ThemeDropdown } from "./ThemeDropdown";
+
 const API_BASE =
   import.meta.env.VITE_API_BASE ||
   `${String(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/api`;
@@ -1818,6 +1820,7 @@ ${safeAnswer}`;
             </button>
           </div>
         ) : null}
+        <ThemeDropdown />
       </div>
     </nav>
   );
@@ -1825,6 +1828,9 @@ ${safeAnswer}`;
   if (!authUserId) {
     return (
       <div className="min-h-screen bg-base-200 p-4 md:p-6">
+        <div className="fixed right-4 top-4 z-50">
+          <ThemeDropdown />
+        </div>
         <div className="mx-auto flex min-h-[70vh] max-w-md items-center">
           <div className="card w-full border border-base-300 bg-base-100 shadow-xl">
             <div className="card-body gap-4">
@@ -2937,6 +2943,7 @@ ${safeAnswer}`;
                 </button>
               </div>
             ) : null}
+            <ThemeDropdown />
           </div>
         </nav>
 
