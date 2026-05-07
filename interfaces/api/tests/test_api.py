@@ -868,7 +868,7 @@ def test_admin_custom_datetime_filters_align_with_asked_column_time_zone(client:
     assert interactions[0]["asked_at"] == asked_at_utc
 
 
-def test_admin_source_proposal_create_and_add_is_sandbox_only(client: TestClient, monkeypatch):
+def test_admin_source_proposal_create_add_and_promote(client: TestClient, monkeypatch):
     monkeypatch.setenv("HIERAG_ADMIN_LOGIN_CODES", "9999ZZ")
 
     create_response = client.post(
@@ -903,17 +903,17 @@ def test_admin_source_proposal_create_and_add_is_sandbox_only(client: TestClient
         headers=auth_headers("9999ZZ", "9.9.9.9"),
         json={},
     )
-    assert promote_response.status_code == 405
+    assert promote_response.status_code == 200
+    payload = promote_response.json()
+    assert payload["proposal"]["status"] == "promoted"
+    assert payload["result"]["applied"]["add"] == 1
+    assert payload["result"]["live_refresh_required"] is True
 
     from core.fastlite_db import bootstrap_scraper_db
 
-    live_db = bootstrap_scraper_db(seed=False)
-    live_rows = list(live_db.t.discovered_urls.rows_where("url=?", ["https://connections/?docs=residential/new-topic"], limit=1))
-    assert live_rows == []
-
-    sandbox_db = bootstrap_scraper_db(Path(proposal["sandbox_db_path"]), seed=False)
-    sandbox_rows = list(sandbox_db.t.discovered_urls.rows_where("url=?", ["https://connections/?docs=residential/new-topic"], limit=1))
-    assert sandbox_rows and sandbox_rows[0]["site_id"] == 2
+    db = bootstrap_scraper_db(seed=False)
+    rows = list(db.t.discovered_urls.rows_where("url=?", ["https://connections/?docs=residential/new-topic"], limit=1))
+    assert rows and rows[0]["site_id"] == 2
 
 
 def test_admin_source_proposal_refresh_only_scrapes_added_urls(client: TestClient, monkeypatch):
