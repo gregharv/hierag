@@ -920,32 +920,6 @@ export function ChatApp() {
     }
   }, [apiFetch, sourceProposalState.selected?.id, sourceTestQuery]);
 
-  const promoteSourceProposal = useCallback(async () => {
-    const proposalId = sourceProposalState.selected?.id;
-    if (!proposalId) return;
-    const ok = window.confirm("Promote these source URL changes to live? New pages still require the next live refresh before they affect answers.");
-    if (!ok) return;
-    setSourceProposalBusy(true);
-    try {
-      const res = await apiFetch(`/admin/source-proposals/${proposalId}/promote`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || "Failed to promote source test set");
-      }
-      const data = await res.json();
-      setSourceProposalState((prev) => ({ ...prev, error: "", selected: data.proposal || prev.selected }));
-      loadSourceProposals();
-    } catch (error) {
-      setSourceProposalState((prev) => ({ ...prev, error: error?.message || "Failed to promote source test set" }));
-    } finally {
-      setSourceProposalBusy(false);
-    }
-  }, [apiFetch, loadSourceProposals, sourceProposalState.selected?.id]);
-
   const createChat = useCallback(async () => {
     const res = await apiFetch("/chats", {
       method: "POST",
@@ -2478,7 +2452,7 @@ ${safeAnswer}`;
                   </button>
                 </div>
                 <p className="text-sm opacity-70">
-                  Each test set copies the live scraper database into an isolated sandbox. URL edits, refreshes, and test queries here do not change live answers until you promote.
+                  Each test set copies the live scraper database into an isolated sandbox. URL edits, refreshes, and test queries here never write to live; the nightly refresh remains the only source of live source changes.
                 </p>
               </div>
             </div>
@@ -2527,9 +2501,6 @@ ${safeAnswer}`;
                         <div className="flex flex-wrap gap-2">
                           <button className="btn btn-sm" type="button" onClick={refreshSourceProposal} disabled={sourceProposalBusy}>
                             Queue sandbox refresh
-                          </button>
-                          <button className="btn btn-sm btn-success" type="button" onClick={promoteSourceProposal} disabled={sourceProposalBusy || !urls.length || selected.status === "promoted"}>
-                            Promote URL changes
                           </button>
                         </div>
                       ) : null}

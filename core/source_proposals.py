@@ -409,51 +409,6 @@ def test_source_proposal_query(proposal_id: int, query: str, created_by: str, *,
     }
 
 
-def promote_source_proposal(proposal_id: int, promoted_by: str, *, site_id: int = 2) -> dict[str, Any]:
-    proposal = get_source_proposal(proposal_id)
-    if proposal is None:
-        raise KeyError("Source proposal not found")
-    changes = list(reversed(list_source_proposal_urls(proposal_id)))
-    if not changes:
-        raise ValueError("No source URL changes to promote")
-
-    live_db = bootstrap_scraper_db(seed=True)
-    applied = {"add": 0, "remove": 0}
-    for change in changes:
-        action = str(change.get("action") or "").strip().lower()
-        canonical = _canonicalize_for_site(live_db, str(change.get("url") or ""), site_id)
-        if action == "add":
-            existing = list(live_db.t.discovered_urls.rows_where("url=?", [canonical], limit=1))
-            if existing:
-                live_db.t.discovered_urls.update({"id": existing[0]["id"], "site_id": int(site_id), "kind": "html"})
-            else:
-                live_db.t.discovered_urls.insert(
-                    site_id=int(site_id),
-                    url=canonical,
-                    kind="html",
-                    discovered_at=_now_iso(),
-                    consecutive_missing=0,
-                    last_fetch_status="",
-                    last_fetch_error="",
-                    last_failed_at="",
-                )
-            applied["add"] += 1
-        elif action == "remove":
-            _prune_missing_url(live_db, canonical)
-            applied["remove"] += 1
-
-    refresh_retrieval_cache(live_db)
-    service.db.t.source_proposals.update(
-        {"id": int(proposal_id), "status": "promoted", "updated_at": _now_iso(), "error": ""}
-    )
-    return {
-        "proposal_id": int(proposal_id),
-        "promoted_by": str(promoted_by or "").strip(),
-        "applied": applied,
-        "live_refresh_required": applied["add"] > 0,
-    }
-
-
 # %%
 if __name__ == "__main__":
     service.create_db_and_tables()

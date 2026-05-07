@@ -67,9 +67,9 @@ Per-page URL pattern:
 
 ## Source Test Sets
 
-Admins can create isolated source-test sandboxes from the client under `Source tests`. Each sandbox copies only `data/scraper.db`, not chat/user data, so admins can add/remove URLs, queue a sandbox refresh, compare live vs sandbox answers, and promote approved URL changes without touching live answers prematurely. Sandbox files default to `data/source_sandboxes/`; override with `HIERAG_SOURCE_SANDBOX_DIR`.
+Admins can create isolated source-test sandboxes from the client under `Source tests`. Each sandbox copies only `data/scraper.db`, not chat/user data, so admins can add/remove URLs, queue a sandbox refresh, and compare live vs sandbox answers without changing live answers. Sandbox files default to `data/source_sandboxes/`; override with `HIERAG_SOURCE_SANDBOX_DIR`.
 
-Promotion applies URL additions/removals to the live scraper database. Newly added pages affect answers after the next live refresh.
+Source test sets are sandbox-only. Live source changes should come from the nightly refresh process.
 
 ## Nightly Connections Refresh
 

@@ -115,10 +115,6 @@ class SourceProposalTestQueryCreate(BaseModel):
     compare_to_live: bool = True
 
 
-class SourceProposalPromoteCreate(BaseModel):
-    site_id: int = 2
-
-
 def _load_llmapi():
     global _LLMAPI
     if _LLMAPI is not None:
@@ -1550,24 +1546,6 @@ def admin_test_source_proposal_query(
     except Exception as exc:
         raise _source_proposal_error(exc) from exc
     return {"result": result, "admin_user_id": admin_login}
-
-
-@api.post("/admin/source-proposals/{proposal_id}/promote")
-def admin_promote_source_proposal(
-    proposal_id: int,
-    payload: SourceProposalPromoteCreate,
-    request: Request,
-) -> dict[str, object]:
-    admin_login, _ = _require_admin(request)
-    try:
-        result = source_proposals.promote_source_proposal(proposal_id, admin_login, site_id=payload.site_id)
-    except Exception as exc:
-        raise _source_proposal_error(exc) from exc
-    return {
-        "result": result,
-        "proposal": source_proposals.get_source_proposal(proposal_id),
-        "admin_user_id": admin_login,
-    }
 
 
 @api.get("/admin/stats/users")
